@@ -67,6 +67,8 @@
 #include "sandstone_utils.h"
 #include "topology.h"
 
+#include <boost/program_options.hpp>
+
 #if SANDSTONE_SSL_BUILD
 #  include "sandstone_ssl.h"
 #  include "sandstone_ssl_rand.h"
@@ -105,73 +107,9 @@
 using namespace std;
 using namespace std::chrono;
 
-enum {
-    invalid_option = 128,         /* not used, here just so the next option is non-zero */
-
-    one_sec_option,
-    thirty_sec_option,
-    two_min_option,
-    five_min_option,
-
-    cpuset_option,
-    disable_option,
-    dump_cpu_info_option,
-    fatal_skips_option,
-    gdb_server_option,
-    ignore_os_errors_option,
-    ignore_unknown_tests_option,
-    is_asan_option,
-    is_debug_option,
-    force_test_time_option,
-    test_knob_option,
-    longer_runtime_option,
-    max_concurrent_threads_option,
-    max_cores_per_slice_option,
-    max_test_count_option,
-    max_test_loop_count_option,
-    max_messages_option,
-    max_logdata_option,
-    mce_check_period_option,
-    mem_sample_time_option,
-    mem_samples_per_log_option,
-    no_mem_sampling_option,
-    no_slicing_option,
-    no_triage_option,
-    on_crash_option,
-    on_hang_option,
-    output_format_option,
-    quality_option,
-    quick_run_option,
-    raw_list_tests,
-    raw_list_group_members,
-    raw_list_groups,
-    retest_on_failure_option,
-    schedule_by_option,
-#ifndef NO_SELF_TESTS
-    selftest_option,
-#endif
-    service_option,
-    shortened_runtime_option,
-    strict_runtime_option,
-    syslog_runtime_option,
-    temperature_threshold_option,
-    test_delay_option,
-    test_index_range_option,
-    test_list_file_option,
-    test_list_randomize_option,
-    test_tests_option,
-    timeout_option,
-    total_retest_on_failure,
-    triage_option,
-    ud_on_failure_option,
-    use_builtin_test_list_option,
-    vary_frequency,
-    vary_uncore_frequency,
-    version_option,
-    weighted_testrun_option,
-};
-
 using namespace std::chrono_literals;
+
+namespace po = boost::program_options;
 
 #ifndef __GLIBC__
 char *program_invocation_name;
@@ -2460,12 +2398,8 @@ static auto collate_test_groups()
     return groups;
 }
 
-static void list_tests(int opt)
+static void list_tests(bool include_tests, bool include_groups, bool include_descriptions)
 {
-    bool include_tests = (opt != raw_list_groups);
-    bool include_groups = (opt != raw_list_tests);
-    bool include_descriptions = (opt == 'l');
-
     auto groups = collate_test_groups();
     int i = 0;
 
@@ -2626,6 +2560,9 @@ static int exec_mode_run(int argc, char **argv)
 }
 
 namespace {
+
+#define TO_STRING(x) #x
+
 enum class OutOfRangeMode { Exit, Saturate };
 template <typename Integer = int> struct ParseIntArgument
 {
@@ -2636,7 +2573,7 @@ template <typename Integer = int> struct ParseIntArgument
     const char *explanation = nullptr;
     MaxInteger min = 0;
     MaxInteger max = std::numeric_limits<Integer>::max();
-    int base = 10;
+    const int base = 10;
     OutOfRangeMode range_mode = OutOfRangeMode::Exit;
 
     void print_explanation() const
@@ -2661,6 +2598,26 @@ template <typename Integer = int> struct ParseIntArgument
                     program_invocation_name, severity, name, arg, min, max);
         }
         print_explanation();
+    }
+
+    Integer operator()(int arg) const
+    {
+        assert(min <= max);
+        assert(Integer(min) == min);
+        assert(Integer(max) == max);
+
+        // validate range
+        if (arg < min || arg > max) {
+            print_range_error(TO_STRING(arg));
+            if (range_mode == OutOfRangeMode::Exit)
+                exit(EX_USAGE);
+
+            if (arg < min)
+                arg = Integer(min);
+            else if (arg > max)
+                arg = Integer(max);
+        }
+        return arg;
     }
 
     // non-const because this usually comes from optarg anyway
@@ -2733,11 +2690,6 @@ static auto parse_testrun_range(const char *arg, int &starting_test_number, int 
     return EXIT_SUCCESS;
 }
 
-static void warn_deprecated_opt(const char *opt)
-{
-    fprintf(stderr, "%s: option '%s' is ignored and will be removed in a future version.\n",
-            program_invocation_name, opt);
-}
 
 /* Setup of the performance counters we read to get getloadavg() on linux. */
 #ifdef _WIN32
@@ -3062,121 +3014,72 @@ skip_wait:
     return true;
 }
 
+namespace {
+void validate_excludes_with(const po::variables_map& vm, const char* this_opt, std::vector<const char*> opts) {
+    for (auto opt: opts) {
+        if (vm.count(opt)) {
+            fprintf(stderr, "Error parsing options: options %s and %s are mutually exclusive\n", this_opt, opt);
+            // suggest_help();
+            exit(EX_USAGE); // is this a good idea to exit?
+        }
+    }
+}
+
+class VerbosityCounter : public po::typed_value<int>
+{
+public:
+    VerbosityCounter():
+        VerbosityCounter(nullptr)
+    {}
+
+    VerbosityCounter(int* store):
+        po::typed_value<int>(store)
+    {
+        default_value(0);
+        zero_tokens();
+    }
+
+    virtual ~VerbosityCounter()
+    {}
+
+    virtual void xparse(boost::any& store, const std::vector<std::string>& /*tokens*/) const
+    {
+        // TODO set some saturation threshold
+        store = boost::any(++count);
+    }
+
+private:
+    mutable int count = 0;
+};
+}
+
 extern constexpr const uint64_t minimum_cpu_features = _compilerCpuFeatures;
 int main(int argc, char **argv)
 {
     // initialize the main application
     new (sApp) SandstoneApplication;
 
-    static struct option long_options[]  = {
-        { "1sec", no_argument, nullptr, one_sec_option },
-        { "30sec", no_argument, nullptr, thirty_sec_option },
-        { "2min", no_argument, nullptr, two_min_option },
-        { "5min", no_argument, nullptr, five_min_option },
-        { "alpha", no_argument, &sApp->requested_quality, INT_MIN },
-        { "beta", no_argument, &sApp->requested_quality, 0 },
-        { "cpuset", required_argument, nullptr, cpuset_option },
-        { "disable", required_argument, nullptr, disable_option },
-        { "dump-cpu-info", no_argument, nullptr, dump_cpu_info_option },
-        { "enable", required_argument, nullptr, 'e' },
-        { "fatal-errors", no_argument, nullptr, 'F'},
-        { "fatal-skips", no_argument, nullptr, fatal_skips_option },
-        { "fork-mode", required_argument, nullptr, 'f' },
-        { "help", no_argument, nullptr, 'h' },
-        { "ignore-os-errors", no_argument, nullptr, ignore_os_errors_option },
-        { "ignore-timeout", no_argument, nullptr, ignore_os_errors_option },
-        { "ignore-unknown-tests", no_argument, nullptr, ignore_unknown_tests_option },
-        { "list", no_argument, nullptr, 'l' },
-        { "list-tests", no_argument, nullptr, raw_list_tests },
-        { "list-group-members", required_argument, nullptr, raw_list_group_members },
-        { "list-groups", no_argument, nullptr, raw_list_groups },
-        { "longer-runtime", required_argument, nullptr, longer_runtime_option },
-        { "max-concurrent-threads", required_argument, nullptr, max_concurrent_threads_option },
-        { "max-cores-per-slice", required_argument, nullptr, max_cores_per_slice_option },
-        { "max-logdata", required_argument, nullptr, max_logdata_option },
-        { "max-messages", required_argument, nullptr, max_messages_option },
-        { "max-test-count", required_argument, nullptr, max_test_count_option },
-        { "max-test-loop-count", required_argument, nullptr, max_test_loop_count_option },
-        { "mce-check-every", required_argument, nullptr, mce_check_period_option },
-        { "mem-sample-time", required_argument, nullptr, mem_sample_time_option },
-        { "mem-samples-per-log", required_argument, nullptr, mem_samples_per_log_option},
-        { "no-memory-sampling", no_argument, nullptr, no_mem_sampling_option },
-        { "no-slicing", no_argument, nullptr, no_slicing_option },
-        { "triage", no_argument, nullptr, triage_option },
-        { "no-triage", no_argument, nullptr, no_triage_option },
-        { "on-crash", required_argument, nullptr, on_crash_option },
-        { "on-hang", required_argument, nullptr, on_hang_option },
-        { "output-format", required_argument, nullptr, output_format_option},
-        { "output-log", required_argument, nullptr, 'o' },
-        { "quality", required_argument, nullptr, quality_option },
-        { "quick", no_argument, nullptr, quick_run_option },
-        { "quiet", no_argument, nullptr, 'q' },
-        { "retest-on-failure", required_argument, nullptr, retest_on_failure_option },
-        { "rng-state", required_argument, nullptr, 's' },
-        { "schedule-by", required_argument, nullptr, schedule_by_option },
-#ifndef NO_SELF_TESTS
-        { "selftests", no_argument, nullptr, selftest_option },
-#endif
-        { "service", no_argument, nullptr, service_option },
-        { "shorten-runtime", required_argument, nullptr, shortened_runtime_option },
-        { "strict-runtime", no_argument, nullptr, strict_runtime_option },
-        { "syslog", no_argument, nullptr, syslog_runtime_option },
-        { "temperature-threshold", required_argument, nullptr, temperature_threshold_option },
-        { "test-delay", required_argument, nullptr, test_delay_option },
-        { "test-list-file", required_argument, nullptr, test_list_file_option },
-        { "test-range", required_argument, nullptr, test_index_range_option },
-        { "test-list-randomize", no_argument, nullptr, test_list_randomize_option },
-        { "test-time", required_argument, nullptr, 't' },   // repeated below
-        { "force-test-time", no_argument, nullptr, force_test_time_option },
-        { "test-option", required_argument, nullptr, 'O'},
-        { "threads", required_argument, nullptr, 'n' },
-        { "time", required_argument, nullptr, 't' },        // repeated above
-        { "timeout", required_argument, nullptr, timeout_option },
-        { "total-retest-on-failure", required_argument, nullptr, total_retest_on_failure },
-        { "total-time", required_argument, nullptr, 'T' },
-        { "ud-on-failure", no_argument, nullptr, ud_on_failure_option },
-        { "use-builtin-test-list", optional_argument, nullptr, use_builtin_test_list_option },
-        { "vary-frequency", no_argument, nullptr, vary_frequency},
-        { "vary-uncore-frequency", no_argument, nullptr, vary_uncore_frequency},
-        { "verbose", no_argument, nullptr, 'v' },
-        { "version", no_argument, nullptr, version_option },
-        { "weighted-testrun-type", required_argument, nullptr, weighted_testrun_option },
-        { "yaml", optional_argument, nullptr, 'Y' },
-
-#if defined(__SANITIZE_ADDRESS__)
-        { "is-asan-build", no_argument, nullptr, is_asan_option },
-#endif
-#ifndef NDEBUG
-        // debug-mode only options:
-        { "gdb-server", required_argument, nullptr, gdb_server_option },
-        { "is-debug-build", no_argument, nullptr, is_debug_option },
-        { "test-tests", no_argument, nullptr, test_tests_option },
-#endif
-        { nullptr, 0, nullptr, 0 }
-    };
-
-    const char *seed = nullptr;
+    std::string seed;
     int max_cores_per_slice = 0;
-    int opt;
     int total_failures = 0;
     int total_successes = 0;
     int total_skips = 0;
     int thread_count = -1;
     bool fatal_errors = false;
-    const char *on_hang_arg = nullptr;
-    const char *on_crash_arg = nullptr;
+    std::string on_hang_arg;
+    std::string on_crash_arg;
 
     // test selection
-    std::vector<const char *> enabled_tests;
-    std::vector<const char *> disabled_tests;
-    const char *test_list_file_path = nullptr;
+    std::vector<std::string> enabled_tests;
+    std::vector<std::string> disabled_tests;
+    std::string test_list_file_path;
 
     struct test_set_cfg test_set_config = {
         .ignore_unknown_tests = false,
         .randomize = false,
         .cycle_through = false,
     };
-    const char *builtin_test_list_name = nullptr;
+    const char* builtin_test_list_name = nullptr;
     int starting_test_number = 1;  // One based count for user interface, not zero based
     int ending_test_number = INT_MAX;
 
@@ -3202,397 +3105,416 @@ int main(int argc, char **argv)
         init_topology(std::move(enabled_cpus));
     }
 
-    int coptind = -1;
-
-    while (!SandstoneConfig::RestrictedCommandLine &&
-           (opt = simple_getopt(argc, argv, long_options, &coptind)) != -1) {
-        switch (opt) {
-        case disable_option:
-            disabled_tests.push_back(optarg);
-            break;
-        case 'e':
-            enabled_tests.push_back(optarg);
-            break;
-        case 'f':
-            if (strcmp(optarg, "no") == 0 || strcmp(optarg, "no-fork") == 0) {
-                sApp->fork_mode = SandstoneApplication::no_fork;
-            } else if (!strcmp(optarg, "exec")) {
-                sApp->fork_mode = SandstoneApplication::exec_each_test;
-#ifndef _WIN32
-            } else if (strcmp(optarg, "yes") == 0 || strcmp(optarg, "each-test") == 0) {
-                sApp->fork_mode = SandstoneApplication::fork_each_test;
+    po::options_description desc("Options");
+    desc.add_options()
+        ("help,h", po::value<bool>()->implicit_value(true)->zero_tokens(), "Show help and exit") // use value<bool> rather than bool_switch to further use vm.count() (for bool_switch vm.count() is always true)
+        ("enable,e", po::value<std::vector<std::string>>(&enabled_tests)->multitoken()->composing(), "Enabled tests")
+        ("disable", po::value<std::vector<std::string>>(&disabled_tests)->multitoken()->composing(), "Disabled tests")
+        ("test-list-randomize", po::bool_switch(&test_set_config.randomize), "Randomize test list")
+        ("max-messages", po::value<int>(), "Maximum number of messages (per thread) to log in each test (0 is unlimited)")
+        ("no-slicing", po::value<bool>()->implicit_value(true)->zero_tokens(), "No slicing")
+        ("beta", po::value<bool>()->implicit_value(true)->zero_tokens(), "Beta tests")
+        ("quality", po::value<int>(), "Quality")
+        ("rng-state,s", po::value<std::string>(&seed), "Seed")
+        ("quiet,q", po::value<bool>()->implicit_value(true)->zero_tokens(), "Quiet mode")
+        ("fatal-errors,F", po::bool_switch(&fatal_errors), "Fatal errors")
+        ("output-log,o", po::value<std::string>(&sApp->file_log_path), "File log path")
+        ("test-option,O", po::value<std::string>()->multitoken(), "Test option")
+        ("time,t", po::value<std::string>(), "Time")
+        ("total-time,T", po::value<std::string>(), "Total time")
+        ("verbose,v", new VerbosityCounter(&sApp->shmem->verbosity), "Verbosity")
+        ("force-test-time", po::bool_switch(&sApp->force_test_time), "Force test time")
+        ("timeout", po::value<std::string>(), "Timeout")
+        ("dump-cpu-info", po::value<bool>()->implicit_value(true)->zero_tokens(), "Dump CPU info and exit")
+        ("on-hang", po::value<std::string>(&on_hang_arg), "On hang")
+        ("on-crash", po::value<std::string>(&on_crash_arg), "On crash")
+        ("ignore-os-errors", po::bool_switch(&sApp->ignore_os_errors), "Ignore OS errors")
+        ("ignore-timeout", po::bool_switch(&test_set_config.ignore_unknown_tests), "Ignore timeout")
+        ("threads,n", po::value<int>(), "Number of threads")
+        ("list,l", po::value<bool>()->implicit_value(true)->zero_tokens(), "List")
+        ("list-tests", po::value<bool>()->implicit_value(true)->zero_tokens(), "List tests")
+        ("list-groups", po::value<bool>()->implicit_value(true)->zero_tokens(), "List groups")
+        ("list-group-members", po::value<bool>()->implicit_value(true)->zero_tokens(), "List group members")
+        ("yaml,Y", po::value<int>(), "YAML indentation")
+        ("cpuset", po::value<std::string>(), "Cpuset")
+        ("max-cores-per-slice", po::value<int>(), "Max cores per slice")
+        ("mce-check-every", po::value<int>(&sApp->mce_check_period), "Mce check period")
+        ("output-format", po::value<std::string>(), "Output format")
+        ("quick", po::value<bool>()->implicit_value(true)->zero_tokens(), "Quick run")
+        ("strict-runtime", po::bool_switch(&sApp->shmem->use_strict_runtime), "Strict runtime")
+        ("retest-on-failure", po::value<int>(), "Retest on failure")
+        ("syslog", po::value<bool>()->implicit_value(true)->zero_tokens(), "Syslog")
+        ("service", po::value<bool>()->implicit_value(true)->zero_tokens(), "Service")
+        ("ud-on-failure", po::bool_switch(&sApp->shmem->ud_on_failure), "UD on failure")
+        ("use-builtin-test-list", po::value<std::string>()->implicit_value(std::string{}), "Use built-in test list")
+        ("temperature-threshold", po::value<std::string>(), "Temperature threshold")
+        ("test-delay", po::value<std::string>(), "Test delay")
+        ("test-tests", po::value<bool>()->implicit_value(true)->zero_tokens(), "Test tests")
+        ("total-retest-on-failure", po::value<int>(), "Total retest on failure")
+        ("test-list-file", po::value<std::string>(&test_list_file_path), "Test list file")
+        ("fork-mode,f", po::value<std::string>(), "Fork mode")
+        ("test-range", po::value<std::string>(), "Test range")
+        ("max-logdata", po::value<int>(), "Max log data")
+        ("vary-frequency", po::value<bool>()->implicit_value(true)->zero_tokens(), "Vary frequency")
+        ("vary-uncore-frequency", po::value<bool>()->implicit_value(true)->zero_tokens(), "Vary uncore frequency")
+        ("version", po::value<bool>()->implicit_value(true)->zero_tokens(), "Show version")
+        ("1sec", po::value<bool>()->implicit_value(true)->zero_tokens(), "1 sec")
+        ("30sec", po::value<bool>()->implicit_value(true)->zero_tokens(), "30 sec")
+        ("2min", po::value<bool>()->implicit_value(true)->zero_tokens(), "2 min")
+        ("5min", po::value<bool>()->implicit_value(true)->zero_tokens(), "5 min")
+        ("max-test-count", po::value<int>(), "Max test count")
+        ("max-test-loop-count", po::value<int>(), "Max test loop count")
+        ("longer-runtime", po::value<std::string>(), "Deprecated")
+        ("max-concurrent-threads", po::value<std::string>(), "Deprecated")
+        ("no-triage", po::value<std::string>(), "Deprecated")
+        ("triage", po::value<std::string>(), "Deprecated")
+        ("schedule-by", po::value<std::string>(), "Deprecated")
+        ("shorten-runtime", po::value<std::string>(), "Deprecated")
+        ("weighted-testrun-type", po::value<std::string>(), "Deprecated")
+        ("mem-sample-time", po::value<std::string>(), "Deprecated")
+        ("mem-samples-per-log", po::value<std::string>(), "Deprecated")
+        ("no-memory-sampling", po::value<std::string>(), "Deprecated")
+#ifndef NDEBUG
+        ("gdb-server", po::value<std::string>(&sApp->gdb_server_comm), "GDB Server")
+        ("is-debug-build", po::value<bool>(), "Is debug build") // TODO just exit ?
 #endif
-            } else {
-                fprintf(stderr, "%s: unknown option to -f: %s\n", argv[0], optarg);
-                usage(argv);
-                return EX_USAGE;
-            }
-            break;
-        case 'F':
-            fatal_errors = true;
-            break;
-        case 'h':
+#if defined(__SANITIZE_ADDRESS__)
+        ("is-asan-build", po::value<bool>(), "Is ASAN build") // TODO just exit ?
+#endif
+#ifndef NO_SELF_TESTS
+        ("selftests", po::value<bool>()->implicit_value(true)->zero_tokens(), "Self tests")
+#endif
+    ;
+
+    po::options_description desc_no_cmd("Options");
+    desc_no_cmd.add_options()
+        ("help,h", po::value<bool>()->implicit_value(true)->zero_tokens(), "Show help and exit")
+        ("query", po::value<bool>()->implicit_value(true)->zero_tokens(), "Show version")
+        ("service", po::value<bool>()->implicit_value(true)->zero_tokens(), "Service")
+        ("version", po::value<bool>()->implicit_value(true)->zero_tokens(), "Show version")
+    ;
+
+    if (!SandstoneConfig::RestrictedCommandLine) {
+        // parse
+        po::variables_map vm;
+        try {
+            po::store(po::parse_command_line(argc, argv, desc), vm);
+            po::notify(vm);
+        } catch (po::error& e) {
+            fprintf(stderr, "Error parsing options: %s\n", e.what());
+            return EXIT_FAILURE;
+        } catch (std::exception& e) {
+            fprintf(stderr, "Caught C++ exception: \"%s\" (type '%s')\n", e.what(), typeid(e).name());
+            return EXIT_FAILURE;
+        }
+
+        // validate
+        if (vm.count("help")) {
+            validate_excludes_with(vm, "help", {"dump-cpu-info", "list", "list-tests", "list-groups", "list-group-members", "version"});
             usage(argv);
             return EXIT_SUCCESS;
-        case 'l':
-        case raw_list_tests:
-        case raw_list_groups:
-            test_set = new SandstoneTestSet(test_set_config, SandstoneTestSet::enable_all_tests);
-            list_tests(opt);
-            return EXIT_SUCCESS;
-        case raw_list_group_members:
-            test_set = new SandstoneTestSet(test_set_config, SandstoneTestSet::enable_all_tests);
-            list_group_members(optarg);
-            return EXIT_SUCCESS;
-        case 'n':
-            thread_count = ParseIntArgument<>{
-                    .name = "-n / --threads",
-                    .min = 1,
-                    .max = sApp->thread_count,
-                    .range_mode = OutOfRangeMode::Saturate
-            }();
-            break;
-        case 'o':
-            sApp->file_log_path = optarg;
-            break;
-        case 'O':
-            sApp->shmem->log_test_knobs = true;
-            if ( ! set_knob_from_key_value_string(optarg)){
-                fprintf(stderr, "Malformed test knob: %s (should be in the form KNOB=VALUE)\n", optarg);
-                return EX_USAGE;
-            }
-            break;
-
-        case 'q':
-            sApp->shmem->verbosity = 0;
-            break;
-        case 's':
-            seed = optarg;
-            break;
-        case 't':
-            sApp->test_time = string_to_millisecs(optarg);
-            break;
-        case force_test_time_option: /* overrides max and min duration specified by the test */
-            sApp->force_test_time = true;
-            break;
-        case 'T':
-            if (strcmp(optarg, "forever") == 0) {
-                sApp->endtime = MonotonicTimePoint::max();
-            } else {
-                sApp->endtime = sApp->starttime + string_to_millisecs(optarg);
-            }
-            test_set_config.cycle_through = true; /* Time controls when the execution stops as
-                                                     opposed to the number of tests. */
-            break;
-        case 'v':
-            if (sApp->shmem->verbosity < 0)
-                sApp->shmem->verbosity = 1;
-            else
-                ++sApp->shmem->verbosity;
-            break;
-        case 'Y':
-            sApp->shmem->output_format = SandstoneApplication::OutputFormat::yaml;
-            if (optarg)
-                sApp->shmem->output_yaml_indent = ParseIntArgument<>{
-                        .name = "-Y / --yaml",
-                        .max = 160,     // arbitrary
-                }();
-            break;
-        case cpuset_option:
-            apply_cpuset_param(optarg);
-            break;
-        case dump_cpu_info_option:
+        }
+        if (vm.count("dump-cpu-info")) {
+            validate_excludes_with(vm, "dump-cpu-info", {"help", "list", "list-tests", "list-groups", "list-group-members", "version"});
             dump_cpu_info();
             return EXIT_SUCCESS;
-        case fatal_skips_option:
-            sApp->fatal_skips = true;
-            break;
-#ifndef NDEBUG
-        case gdb_server_option:
-            sApp->gdb_server_comm = optarg;
-            break;
-#endif
-        case ignore_os_errors_option:
-            sApp->ignore_os_errors = true;
-            break;
-        case ignore_unknown_tests_option:
-            test_set_config.ignore_unknown_tests = true;
-            break;
-        case is_asan_option:
-        case is_debug_option:
-            // these options are only accessible in the command-line if the
-            // corresponding functionality is active
+        }
+        if (vm.count("list") || vm.count("list-tests") || vm.count("list-groups")) {
+            validate_excludes_with(vm, "list", {"help", "dump-cpu-info", "list-group-members", "version"});
+            test_set = new SandstoneTestSet(test_set_config, SandstoneTestSet::enable_all_tests);
+            list_tests(!vm.count("list-groups"), !vm.count("list-tests"), vm.count("list"));
             return EXIT_SUCCESS;
-        case max_cores_per_slice_option:
-            max_cores_per_slice = ParseIntArgument<>{
-                    .name = "--max-cores-per-slice",
-                    .min = -1,
-                }();
-            break;
-        case mce_check_period_option:
-            sApp->mce_check_period = ParseIntArgument<>{"--mce-check-every"}();
-            break;
-        case no_slicing_option:
-            max_cores_per_slice = -1;
-            break;
-        case on_crash_option:
-            on_crash_arg = optarg;
-            break;
-        case on_hang_option:
-            on_hang_arg = optarg;
-            break;
-        case output_format_option:
-            if (strcmp(optarg, "key-value") == 0) {
-                sApp->shmem->output_format = SandstoneApplication::OutputFormat::key_value;
-            } else if (strcmp(optarg, "tap") == 0) {
-                sApp->shmem->output_format = SandstoneApplication::OutputFormat::tap;
-            } else if (strcmp(optarg, "yaml") == 0) {
-                sApp->shmem->output_format = SandstoneApplication::OutputFormat::yaml;
-            } else if (SandstoneConfig::Debug && strcmp(optarg, "none") == 0) {
-                // for testing only
-                sApp->shmem->output_format = SandstoneApplication::OutputFormat::no_output;
-                sApp->shmem->verbosity = -1;
-            } else {
-                fprintf(stderr, "%s: unknown output format: %s\n", argv[0], optarg);
-                return EX_USAGE;
-            }
-            break;
+        }
+        if (vm.count("list-group-members")) {
+            validate_excludes_with(vm, "list-group-members", {"help", "dump-cpu-info", "list", "list-tests", "list-groups", "version"});
+            test_set = new SandstoneTestSet(test_set_config, SandstoneTestSet::enable_all_tests);
+            list_group_members(vm["list-group-members"].as<char*>());
+            return EXIT_SUCCESS;
+        }
+        if (vm.count("version")) {
+            validate_excludes_with(vm, "version", {"help", "dump-cpu-info", "list", "list-tests", "list-groups", "list-group-members"});
+            logging_print_version();
+            return EXIT_SUCCESS;
+        }
 
-        case quality_option:
+        if (vm.count("no-slicing")) {
+            validate_excludes_with(vm, "no-slicing", {"max-cores-per-slice"});
+            max_cores_per_slice = -1;
+        }
+        if (vm.count("beta")) {
+            validate_excludes_with(vm, "beta", {"quality"});
+            sApp->requested_quality = 0;
+        }
+        if (vm.count("quality")) {
+            validate_excludes_with(vm, "quality", {"beta"});
             sApp->requested_quality = ParseIntArgument<>{
                     .name = "--quality",
                     .min = -1000,
                     .max = +1000,
                     .range_mode = OutOfRangeMode::Saturate
-            }();
-            break;
-
-        case quick_run_option:
+            }(vm["quality"].as<int>());
+        }
+        if (vm.count("max-messages")) {
+            sApp->shmem->max_messages_per_thread = ParseIntArgument<>{
+                    .name = "max-messages",
+                    .min = -1,
+                    .range_mode = OutOfRangeMode::Saturate
+            }(vm["max-messages"].as<int>());
+            if (sApp->shmem->max_messages_per_thread <= 0) { // TODO introduce new OutOfRangeMode::SaturateWithMax to handle this case?
+                sApp->shmem->max_messages_per_thread = INT_MAX;
+            }
+            printf("max-messages %d\n", sApp->shmem->max_messages_per_thread);
+        }
+        if (vm.count("quiet")) {
+            validate_excludes_with(vm, "quiet", {"verbose"});
+            sApp->shmem->verbosity = 0;
+        }
+        if (vm.count("test-option")) {
+            sApp->shmem->log_test_knobs = true;
+            auto values = vm["test-option"].as<std::vector<std::string>>();
+            for (const auto& value: values) {
+                if (!set_knob_from_key_value_string(value.c_str())){
+                    fprintf(stderr, "Malformed test knob: %s (should be in the form KNOB=VALUE)\n", value.c_str());
+                    return EX_USAGE;
+                }
+            }
+        }
+        if (vm.count("time")) {
+            sApp->test_time = string_to_millisecs(vm["time"].as<std::string>());
+        }
+        if (vm.count("total-time")) {
+            auto value = vm["total-time"].as<std::string>();
+            if (strcmp(value.c_str(), "forever") == 0) {
+                sApp->endtime = MonotonicTimePoint::max();
+            } else {
+                sApp->endtime = sApp->starttime + string_to_millisecs(value);
+            }
+            test_set_config.cycle_through = true; /* Time controls when the execution stops as
+                                                        opposed to the number of tests. */
+        }
+        if (vm.count("timeout")) {
+            sApp->max_test_time = string_to_millisecs(vm["timeout"].as<std::string>());
+        }
+        if (vm.count("threads")) {
+            thread_count = ParseIntArgument<>{
+                .min = 1,
+                .max = sApp->thread_count,
+                .range_mode = OutOfRangeMode::Saturate
+            }(vm["threads"].as<int>());
+        }
+        if (vm.count("yaml")) {
+            sApp->shmem->output_format = SandstoneApplication::OutputFormat::yaml;
+            if (!vm["yaml"].defaulted())
+                sApp->shmem->output_yaml_indent = ParseIntArgument<>{
+                    .max = 160,     // arbitrary
+                }(vm["yaml"].as<int>());
+        }
+        if (vm.count("cpuset")) {
+            apply_cpuset_param(vm["cpuset"].as<char*>());
+        }
+        if (vm.count("max-cores-per-slice")) {
+            validate_excludes_with(vm, "max-cores-per-slice", {"no-slicing"});
+            max_cores_per_slice = ParseIntArgument<>{
+                .name = "--max-cores-per-slice",
+                .min = -1,
+            }(vm["max-cores-per-slice"].as<int>());
+        }
+        if (vm.count("output-format")) {
+            auto value = vm["output-format"].as<std::string>();
+            if (value == "key-value") {
+                sApp->shmem->output_format = SandstoneApplication::OutputFormat::key_value;
+            } else if (value == "tap") {
+                sApp->shmem->output_format = SandstoneApplication::OutputFormat::tap;
+            } else if (value == "yaml") {
+                sApp->shmem->output_format = SandstoneApplication::OutputFormat::yaml;
+            } else if (SandstoneConfig::Debug && value == "none") {
+                // for testing only
+                sApp->shmem->output_format = SandstoneApplication::OutputFormat::no_output;
+                sApp->shmem->verbosity = -1; // TODO should it ovewrite verbose/quiet or throw mutually exclusive?
+            } else {
+                fprintf(stderr, "%s: unknown output format: %s\n", argv[0], value.c_str());
+                return EX_USAGE;
+            }
+        }
+        if (vm.count("quick")) {
             sApp->max_test_loop_count = 1;
             sApp->delay_between_tests = 0ms;
-            break;
-        case retest_on_failure_option:
+        }
+        if (vm.count("retest-on-failure")) {
             sApp->retest_count = ParseIntArgument<>{
                     .name = "--retest-on-failure",
                     .max = SandstoneApplication::MaxRetestCount,
                     .range_mode = OutOfRangeMode::Saturate
-            }();
-            break;
-        case strict_runtime_option:
-            sApp->shmem->use_strict_runtime = true;
-            break;
-        case syslog_runtime_option:
+            }(vm["retest-on-failure"].as<int>());
+        }
+        if (vm.count("syslog")) {
             sApp->syslog_ident = program_invocation_name;
-            break;
+        }
+        if (vm.count("service")) {
+            // keep in sync with RestrictedCommandLine below
+            fatal_errors = true;
+            sApp->endtime = MonotonicTimePoint::max();
+            sApp->service_background_scan = true;
+        }
+        if (vm.count("use-builtin-test-list")) {
+            auto value = vm["use-builtin-test-list"].as<char*>();
+            if (!SandstoneConfig::HasBuiltinTestList) {
+                fprintf(stderr, "%s: --use-builtin-test-list specified but this build does not "
+                                "have a built-in test list.\n", argv[0]);
+                return EX_USAGE;
+            }
+            builtin_test_list_name = value ? value : "auto";
+        }
+        if (vm.count("temperature-threshold")) {
+            if (vm["temperature-threshold"].as<std::string>() == "disable") {
+                sApp->thermal_throttle_temp = -1;
+            } else {
+                sApp->thermal_throttle_temp = ParseIntArgument<>{
+                    .name = "--temperature-threshold",
+                    .explanation = "value should be specified in thousands of degrees Celsius "
+                                    "(for example, 85000 is 85 degrees Celsius), or \"disable\" "
+                                    "to disable monitoring",
+                    .max = 160000,      // 160 C is WAAAY too high anyway
+                    .range_mode = OutOfRangeMode::Saturate
+                }(vm["temperature-threshold"].as<char*>());
+            }
+        }
+        if (vm.count("test-delay")) {
+            sApp->delay_between_tests = string_to_millisecs(vm["test-delay"].as<char*>());
+        }
+        if (vm.count("test-tests")) {
+            sApp->enable_test_tests();
+            if (sApp->test_tests_enabled()) {
+                // disable other options that don't make sense in this mode
+                sApp->retest_count = 0;
+            }
+        }
+        if (vm.count("total-retest-on-failure")) {
+            sApp->total_retest_count = ParseIntArgument<>{
+                    .name = "--total-retest-on-failure",
+                    .min = -1
+            }(vm["total-retest-on-failure"].as<int>());
+        }
+        if (vm.count("fork-mode")) {
+            auto value = vm["fork-mode"].as<std::string>();
+            if (value == "no" || value == "no-fork") {
+                sApp->fork_mode = SandstoneApplication::no_fork;
+            } else if (value == "exec") {
+                sApp->fork_mode = SandstoneApplication::exec_each_test;
+#ifndef _WIN32
+            } else if (value == "yes" || value == "each-test") {
+                sApp->fork_mode = SandstoneApplication::fork_each_test;
+#endif
+            } else {
+                fprintf(stderr, "%s: unknown option to -f: %s\n", argv[0], value.c_str());
+                usage(argv);
+                return EX_USAGE;
+            }
+        }
+        if (vm.count("test-range")) {
+            if (parse_testrun_range(vm["test-range"].as<char*>(), starting_test_number, ending_test_number) == EXIT_FAILURE) {
+                return EX_USAGE;
+            }
+        }
+        if (vm.count("max-logdata")) {
+            sApp->shmem->max_logdata_per_thread = ParseIntArgument<unsigned>{
+                    .name = "--max-logdata",
+                    .explanation = "maximum number of bytes of test's data to log per thread (0 is unlimited))",
+                    .base = 0,      // accept hex
+                    .range_mode = OutOfRangeMode::Saturate
+            }(vm["max-logdata"].as<int>());
+            if (sApp->shmem->max_logdata_per_thread == 0) { // here OutOfRangeMode::SaturateWithMax as well?
+                sApp->shmem->max_logdata_per_thread = UINT_MAX;
+            }
+        }
+        if (vm.count("vary-frequency")) {
+            if (!FrequencyManager::FrequencyManagerWorks) {
+                fprintf(stderr, "%s: --vary-frequency works only on Linux\n", program_invocation_name);
+                return EX_USAGE;
+            }
+            sApp->vary_frequency_mode = true;
+        }
+        if (vm.count("vary-uncore-frequency")) {
+            if (!FrequencyManager::FrequencyManagerWorks) {
+                fprintf(stderr, "%s: --vary-uncore-frequency works only on Linux\n", program_invocation_name);
+                return EX_USAGE;
+            }
+            sApp->vary_uncore_frequency_mode = true;
+        }
+        if (vm.count("1sec") || vm.count("30sec") || vm.count("2min") || vm.count("5min")) { // they should be mutually exclusive
+            test_set_config.randomize = true;
+            test_set_config.cycle_through = true;
+            sApp->shmem->use_strict_runtime = true;
+            if (vm.count("1sec"))       sApp->endtime = sApp->starttime + 1s;
+            else if (vm.count("30sec")) sApp->endtime = sApp->starttime + 30s;
+            else if (vm.count("2min"))  sApp->endtime = sApp->starttime + 2min;
+            else if (vm.count("5min"))  sApp->endtime = sApp->starttime + 5min;
+        }
+        if (vm.count("max-test-count")) {
+            sApp->max_test_count = ParseIntArgument<>{"--max-test-count"}(vm["max-test-count"].as<int>());
+        }
+        if (vm.count("max-test-loop-count")) {
+            sApp->max_test_loop_count = ParseIntArgument<>{"--max-test-loop-count"}(vm["max-test-loop-count"].as<int>());
+            if (sApp->max_test_loop_count == 0) {
+                sApp->max_test_loop_count = std::numeric_limits<int>::max();
+            }
+        }
+        // deprecated
+        if (vm.count("longer-runtime") || vm.count("max-concurrent-threads") || vm.count("no-triage") ||
+            vm.count("triage") || vm.count("schedule-by") || vm.count("shorten-runtime") || vm.count("weighted-testrun-type") ||
+            vm.count("mem-sample-time") || vm.count("mem-samples-per-log") || vm.count("no-memory-sampling"))
+        {
+            fprintf(stderr, "%s: option is ignored and will be removed in a future version.\n",
+                program_invocation_name);
+        }
+
 #ifndef NO_SELF_TESTS
-        case selftest_option:
-            if (sApp->requested_quality != SandstoneApplication::DefaultQualityLevel) {
+        if (vm.count("selftests")) {
+            if (vm.count("beta") || vm.count("quality")) {
                 fprintf(stderr, "%s: --selftest is incompatible with --beta or --quality.\n", argv[0]);
                 return EX_USAGE;
             }
             sApp->requested_quality = 0;
             sApp->shmem->selftest = true;
             test_set_config.is_selftest = true;
-            break;
+        }
 #endif
-        case service_option:
-            // keep in sync with RestrictedCommandLine below
-            fatal_errors = true;
-            sApp->endtime = MonotonicTimePoint::max();
-            sApp->service_background_scan = true;
-            break;
-        case ud_on_failure_option:
-            sApp->shmem->ud_on_failure = true;
-            break;
-        case use_builtin_test_list_option:
-            if (!SandstoneConfig::HasBuiltinTestList) {
-                fprintf(stderr, "%s: --use-builtin-test-list specified but this build does not "
-                                "have a built-in test list.\n", argv[0]);
-                return EX_USAGE;
-            }
-            builtin_test_list_name = optarg ? optarg : "auto";
-            break;
-        case temperature_threshold_option:
-            if (strcmp(optarg, "disable") == 0)
-                sApp->thermal_throttle_temp = -1;
-            else
-                sApp->thermal_throttle_temp = ParseIntArgument<>{
-                        .name = "--temperature-threshold",
-                        .explanation = "value should be specified in thousandths of degrees Celsius "
-                                       "(for example, 85000 is 85 degrees Celsius), or \"disable\" "
-                                       "to disable monitoring",
-                        .max = 160000,      // 160 C is WAAAY too high anyway
-                        .range_mode = OutOfRangeMode::Saturate
-                }();
-            break;
-
-        case test_delay_option:
-            sApp->delay_between_tests = string_to_millisecs(optarg);
-            break;
-
-        case test_tests_option:
-            sApp->enable_test_tests();
-            if (sApp->test_tests_enabled()) {
-                // disable other options that don't make sense in this mode
-                sApp->retest_count = 0;
-            }
-            break;
-
-        case timeout_option:
-            sApp->max_test_time = string_to_millisecs(optarg);
-            break;
-
-        case total_retest_on_failure:
-            sApp->total_retest_count = ParseIntArgument<>{
-                    .name = "--total-retest-on-failure",
-                    .min = -1
-            }();
-            break;
-
-        case test_list_file_option:
-            test_list_file_path = optarg;
-            break;
-
-        case test_index_range_option:
-            if (parse_testrun_range(optarg, starting_test_number, ending_test_number) == EXIT_FAILURE)
-                return EX_USAGE;
-            break;
-
-        case test_list_randomize_option:
-            test_set_config.randomize = true;
-            break;
-
-        case max_logdata_option: {
-            sApp->shmem->max_logdata_per_thread = ParseIntArgument<unsigned>{
-                    .name = "--max-logdata",
-                    .explanation = "maximum number of bytes of test's data to log per thread (0 is unlimited))",
-                    .base = 0,      // accept hex
-                    .range_mode = OutOfRangeMode::Saturate
-            }();
-            if (sApp->shmem->max_logdata_per_thread == 0)
-                sApp->shmem->max_logdata_per_thread = UINT_MAX;
-            break;
-        }
-        case max_messages_option:
-            sApp->shmem->max_messages_per_thread = ParseIntArgument<>{
-                    .name = "--max-messages",
-                    .explanation = "maximum number of messages (per thread) to log in each test (0 is unlimited)",
-                    .min = -1,
-                    .range_mode = OutOfRangeMode::Saturate
-            }();
-            if (sApp->shmem->max_messages_per_thread <= 0)
-                sApp->shmem->max_messages_per_thread = INT_MAX;
-            break;
-
-        case vary_frequency:
-            if (!FrequencyManager::FrequencyManagerWorks) {
-                fprintf(stderr, "%s: --vary-frequency works only on Linux\n", program_invocation_name);
-                return EX_USAGE;
-            }
-            sApp->vary_frequency_mode = true;
-            break;
-
-        case vary_uncore_frequency:
-            if (!FrequencyManager::FrequencyManagerWorks) {
-                fprintf(stderr, "%s: --vary-uncore-frequency works only on Linux\n", program_invocation_name);
-                return EX_USAGE;
-            }
-            sApp->vary_uncore_frequency_mode = true;
-            break;
-
-        case version_option:
-            logging_print_version();
-            return EXIT_SUCCESS;
-        case one_sec_option:
-            test_set_config.randomize = true;
-            test_set_config.cycle_through = true;
-            sApp->shmem->use_strict_runtime = true;
-            sApp->endtime = sApp->starttime + 1s;
-            break;
-        case thirty_sec_option:
-            test_set_config.randomize = true;
-            test_set_config.cycle_through = true;
-            sApp->shmem->use_strict_runtime = true;
-            sApp->endtime = sApp->starttime + 30s;
-            break;
-        case two_min_option:
-            test_set_config.randomize = true;
-            test_set_config.cycle_through = true;
-            sApp->shmem->use_strict_runtime = true;
-            sApp->endtime = sApp->starttime + 2min;
-            break;
-        case five_min_option:
-            test_set_config.randomize = true;
-            test_set_config.cycle_through = true;
-            sApp->shmem->use_strict_runtime = true;
-            sApp->endtime = sApp->starttime + 5min;
-            break;
-
-        case max_test_count_option:
-            sApp->max_test_count = ParseIntArgument<>{"--max-test-count"}();
-            break;
-
-        case max_test_loop_count_option:
-            sApp->max_test_loop_count = ParseIntArgument<>{"--max-test-loop-count"}();
-            if (sApp->max_test_loop_count == 0)
-                    sApp->max_test_loop_count = std::numeric_limits<int>::max();
-            break;
-
-            /* deprecated options */
-        case longer_runtime_option:
-        case max_concurrent_threads_option:
-        case mem_sample_time_option:
-        case mem_samples_per_log_option:
-        case no_mem_sampling_option:
-        case no_triage_option:
-        case schedule_by_option:
-        case shortened_runtime_option:
-        case triage_option:
-        case weighted_testrun_option:
-            warn_deprecated_opt(long_options[coptind].name);
-            break;
-
-        case 0:
-            /* long option setting a value */
-            continue;
-        default:
-            suggest_help(argv);
-            return EX_USAGE;
-        }
     }
 
     if (SandstoneConfig::RestrictedCommandLine) {
         // Default options for the simplified OpenDCDiag cmdline
-        static struct option restricted_long_options[] = {
-            { "help", no_argument, nullptr, 'h' },
-            { "query", no_argument, nullptr, 'q' },
-            { "service", no_argument, nullptr, 's' },
-            { "version", no_argument, nullptr, version_option },
-            { nullptr, 0, nullptr, 0 }
-        };
 
-        while ((opt = simple_getopt(argc, argv, restricted_long_options)) != -1) {
-            switch (opt) {
-            case 'q':
-                // ### FIXME
-                fprintf(stderr, "%s: --query not implemented yet\n", argv[0]);
-                abort();
-            case 's':
-                // keep in sync above
-                sApp->endtime = MonotonicTimePoint::max();
-                sApp->service_background_scan = true;
-                break;
-            case version_option:
-                logging_print_version();
-                return EXIT_SUCCESS;
+        // parse
+        po::variables_map vm;
+        try {
+            po::store(po::parse_command_line(argc, argv, desc_no_cmd), vm);
+            po::notify(vm);
+        } catch (po::error& e) {
+            fprintf(stderr, "Error parsing options: %s\n", e.what());
+            return EXIT_FAILURE;
+        } catch (std::exception& e) {
+            fprintf(stderr, "Caught C++ exception: \"%s\" (type '%s')\n", e.what(), typeid(e).name());
+            return EXIT_FAILURE;
+        }
 
-            case 'h':
-                usage(argv);
-                return opt == 'h' ? EXIT_SUCCESS : EX_USAGE;
-            default:
-                suggest_help(argv);
-                return EX_USAGE;
-            }
+        // validate
+        if (vm.count("help")) {
+            usage(argv);
+            return EXIT_SUCCESS;
+        }
+        if (vm.count("query")) {
+            // ### FIXME
+            fprintf(stderr, "%s: --query not implemented yet\n", argv[0]);
+            abort();
+        }
+        if (vm.count("service")) {
+            // keep in sync above
+            sApp->endtime = MonotonicTimePoint::max();
+            sApp->service_background_scan = true;
+        }
+        if (vm.count("version")) {
+            logging_print_version();
+            return EXIT_SUCCESS;
         }
 
         if (SandstoneConfig::NoLogging) {
@@ -3630,16 +3552,19 @@ int main(int argc, char **argv)
 
     signals_init_global();
     resource_init_global();
-    debug_init_global(on_hang_arg, on_crash_arg);
+    debug_init_global(
+        !on_hang_arg.empty() ? on_hang_arg.c_str() : nullptr,
+        !on_crash_arg.empty() ? on_crash_arg.c_str() : nullptr
+    );
     pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, nullptr);
 
     print_application_banner();
     logging_init_global();
     cpu_specific_init();
-    random_init_global(seed);
+    random_init_global(!seed.empty() ? seed.c_str() : nullptr);
     background_scan_init();
 
-    if (enabled_tests.size() || builtin_test_list_name || test_list_file_path) {
+    if (enabled_tests.size() || builtin_test_list_name || !test_list_file_path.empty()) {
         /* if anything other than the "all tests" has been specified, start with
          * an empty list. */
         test_set = new SandstoneTestSet(test_set_config, 0);
@@ -3650,22 +3575,20 @@ int main(int argc, char **argv)
     }
 
     /* Add all the tests we were told to enable. */
-    if (enabled_tests.size()) {
-        for (auto name : enabled_tests) {
-            auto tis = test_set->add(name);
-            if (!tis.size() && !test_set_config.ignore_unknown_tests) {
-                fprintf(stderr, "%s: Cannot find matching tests for '%s'\n", program_invocation_name, name);
-                exit(EX_USAGE);
-            }
+    for (const auto& name : enabled_tests) {
+        auto tis = test_set->add(name.c_str());
+        if (!tis.size() && !test_set_config.ignore_unknown_tests) {
+            fprintf(stderr, "%s: Cannot find matching tests for '%s'\n", program_invocation_name, name.c_str());
+            exit(EX_USAGE);
         }
     }
 
     /* Add the test list file */
-    if (test_list_file_path) {
+    if (!test_list_file_path.empty()) {
         std::vector<std::string> errors;
-        test_set->add_test_list(test_list_file_path, errors);
+        test_set->add_test_list(test_list_file_path.c_str(), errors);
         if (!errors.empty()) {
-            fprintf(stderr, "Error loading test list file %s:\n", test_list_file_path);
+            fprintf(stderr, "Error loading test list file %s:\n", test_list_file_path.c_str());
             for (auto i = errors.begin(); i != errors.end(); i++) {
                 fprintf(stderr, "    %s\n", (*i).c_str());
             }
@@ -3689,10 +3612,8 @@ int main(int argc, char **argv)
     test_set->add(&mce_test);
 
     /* Remove all the tests we were told to disable */
-    if (disabled_tests.size()) {
-        for (auto name : disabled_tests) {
-            test_set->remove(name);
-        }
+    for (const auto& name : disabled_tests) {
+        test_set->remove(name.c_str());
     }
 
     if (sApp->shmem->verbosity == -1)
