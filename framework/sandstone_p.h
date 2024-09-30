@@ -428,8 +428,9 @@ private:
     SandstoneApplication(const SandstoneApplication &) = delete;
     SandstoneApplication &operator=(const SandstoneApplication &) = delete;
     friend int internal_main(int argc, char **argv);
-    friend int main(int argc, char **argv);
+    friend int sandstone_main(int argc, char **argv);
     friend SandstoneApplication *_sApp() noexcept;
+    friend SandstoneApplication* new_sApp();
 };
 
 struct SandstoneApplication::SharedMemory
@@ -486,6 +487,11 @@ inline SandstoneApplication *_sApp() noexcept
 }
 
 #define sApp    _sApp()
+
+// for unittests, where we do not want a singleton, nor custom alignment
+inline SandstoneApplication* new_sApp() {
+    return new SandstoneApplication{};
+}
 
 inline bool SandstoneApplication::is_main_process()
 {

@@ -59,6 +59,7 @@
 
 #include "sandstone.h"
 #include "sandstone_p.h"
+#include "sandstone_opts.hpp"
 #include "sandstone_iovec.h"
 #include "sandstone_kvm.h"
 #include "sandstone_system.h"
@@ -1260,177 +1261,6 @@ __attribute__((weak, noclone, noinline)) int print_application_footer(int exit_c
     return exit_code;
 }
 
-static std::string cpu_features_to_string(uint64_t f)
-{
-    std::string result;
-    const char *comma = "";
-    for (size_t i = 0; i < std::size(x86_locators); ++i) {
-        if (f & (UINT64_C(1) << i)) {
-            result += comma;
-            result += features_string + features_indices[i] + 1;
-            comma = ",";
-        }
-    }
-    return result;
-}
-
-static void dump_cpu_info()
-{
-    int i;
-
-    // find the best matching CPU
-    const char *detected = "<unknown>";
-    for (const auto &arch : x86_architectures) {
-        if ((arch.features & cpu_features) == arch.features) {
-            detected = arch.name;
-            break;
-        }
-        if (sApp->shmem->verbosity > 1)
-            printf("CPU is not %s: missing %s\n", arch.name,
-                   cpu_features_to_string(arch.features & ~cpu_features).c_str());
-    }
-    printf("Detected CPU: %s; family-model-stepping (hex): %02x-%02x-%02x; CPU features: %s\n",
-           detected, cpu_info[0].family, cpu_info[0].model, cpu_info[0].stepping,
-           cpu_features_to_string(cpu_features).c_str());
-    printf("# CPU\tPkgID\tCoreID\tThrdID\tMicrocode\tPPIN\n");
-    for (i = 0; i < num_cpus(); ++i) {
-        printf("%d\t%d\t%d\t%d\t0x%" PRIx64, cpu_info[i].cpu_number,
-               cpu_info[i].package_id, cpu_info[i].core_id, cpu_info[i].thread_id,
-               cpu_info[i].microcode);
-        if (cpu_info[i].ppin)
-            printf("\t%016" PRIx64, cpu_info[i].ppin);
-        puts("");
-    }
-}
-
-static void suggest_help(char **argv) {
-    printf("Try '%s --help' for more information.\n", argv[0]);
-}
-
-static void usage(char **argv)
-{
-    static const char usageText[] = R"(%s [options]
-
-Common command-line options are:
- -F, --fatal-errors
-     Stop execution after first failure; do not continue to run tests.
- -T <time>, --total-time=<time>
-     Specify the minimum run time for the program.  A special value for <time>
-     of "forever" causes the program to loop indefinitely.  The defaults for <time>
-     is milliseconds, with s, m, and h available for seconds, minutes or hours.
-     Example: sandstone -T 60s     # run for at least 60 seconds.
-     Example: sandstone -T 5000    # run for at least 5,000 milliseconds
- --strict-runtime
-     Use in conjunction with -T to force the program to stop execution after the
-     specific time has elapsed.
- -t <test-time>
-     Specify the execution time per test for the program in ms.
-     Value for this field can also be specified with a label s, m, h for seconds,
-     minutes or hours.  Example: 200ms, 2s or 2m
- --max-test-count <NUMBER>
-     Specify the maximum number of tests you want to execute.  Allows you
-     to run at most <NUMBER> tests in a program execution.
- --max-test-loop-count <NUMBER>
-     When this option is present, test execution will be limited by the number
-     of times the test executes its main execution loop. This option augments
-     the time-based options in that the test will end if either the test time
-     condition is exceeded, or the test-max-loop-count is exhausted.  The use
-     of --max-test-loop-count disables test fracturing, the default mode of
-     test execution in which individual tests are run multiple times with
-     different random number seeds during the same invocation of opendcdiag.
-     A value of 0 for --max-test-loop-count is interpreted as there being no
-     limit to the number of loop iterations.  This special value can be
-     used to disable test fracturing.  When specified tests will not be
-     fractured and their execution will be time limited.
- --cpuset=<set>
-     Selects the CPUs to run tests on. The <set> option may be a comma-separated
-     list of either plain numbers that select based on the system's logical
-     processor number, or a letter  followed by a number to select based on
-     topology: p for package, c for core and t for thread.
- --dump-cpu-info
-     Prints the CPU information that the tool detects (package ID, core ID,
-     thread ID, microcode, and PPIN) then exit.
- -e <test>, --enable=<test>, --disable=<test>
-     Selectively enable/disable a given test. Can be given multiple times.
-     <test> is a test's ID (see the -l option), a wildcard matching test IDs.
-     or a test group (starting with @).
- --ignore-os-error, --ignore-timeout
-     Continue execution of Sandstone even if a test encounters an operating
-     system error (this includes tests timing out).
- --ignore-unknown-tests
-     Ignore unknown tests listed on --enable and --disable.
- -h, --help
-     Print help.
- -l, --list
-     Lists the tests and groups, with their descriptions, and exits.
- --list-tests
-     Lists the test names.
- --list-groups
-     Lists the test groups.
- --max-messages <NUMBER>
-     Limits the maximum number of log messages that can be output by a single
-     thread per test invocation.  A value of less than or equal to 0 means
-     that there is no limit.  The default value is 5.
- --max-logdata <NUMBER>
-     Limits the maximum number of bytes of binary data that can be logged
-     by a single thread per test invocation.  A value of less than or equal
-     to 0 means that there is no limit.  The default value is 128.
-     Sandstone will not log partial data, so if the binary data would cause
-     the thread to exceed this threshold it simply will not be output.
- -n <NUMBER>, --threads=<NUMBER>
-     Set the number of threads to be run to <NUMBER>. If not specified or if
-     0 is passed, then the test defaults to the number of CPUs in the system.
-     Note the --cpuset and this parameter do not behave well together.
- -o, --output-log <FILE>
-     Place all logging information in <FILE>.  By default, a file name is
-     auto-generated by the program.  Use -o /dev/null to suppress creation of any file.
- -s <STATE>, --rng-state=<STATE>
-     Specify the random generator state to reload. The seed is in the form:
-       Engine:engine-specific-data
- -v, -q, --verbose, --quiet
-     Set logging output verbosity level.  Default is quiet.
- --version
-     Display program version information.
- --1sec, --30sec, --2min, --5min
-     Run for the specified amount of time in the option. In this mode, the program
-     prioritizes test execution based on prior detections.
-     These options are intended to drive coverage over multiple runs.
-     Test priority is ignored when running in combination with the
-     --test-list-file option.
- --test-list-file <file path>
-     Specifies the tests to run in a text file.  This will run the tests
-     in the order they appear in the file and also allows you to vary the
-     individual test durations.  See the User Guide for details.
- --test-range A-B
-     Run tests from test number A to test number B based on their list location
-     in an input file specified using --test-list-file <inputfile>.
-     For example: --test-list-file mytests.list -test-range 6-10
-                  runs tests 6 through 10 from the file mytests.list.
-     See User Guide for more details.
- --test-list-randomize
-     Randomizes the order in which tests are executed.
- --test-delay <time in ms>
-     Delay between individual test executions in milliseconds.
-  -Y, --yaml [<indentation>]
-     Use YAML for logging. The optional argument is the number of spaces to
-     indent each line by (defaults to 0).
-
-For more options and information, please see the User Reference
-Guide.
-)";
-
-    static const char restrictedUsageText[] = R"(%s [options]
-
-Available command-line options are:
- -h, --help         Print help.
- -q, --query        Reports whether a scan service found an issue and exits.
- -s, --service      Run as a slow scan service.
-     --version      Display version number.
-)";
-
-    printf(SandstoneConfig::RestrictedCommandLine ? restrictedUsageText : usageText, argv[0]);
-}
-
 // Called every time we restart the tests
 static void restart_init(int iterations)
 {
@@ -2380,80 +2210,6 @@ out:
     return state;
 }
 
-static auto collate_test_groups()
-{
-    struct Group {
-        const struct test_group *definition = nullptr;
-        std::vector<const struct test *> entries;
-    };
-    std::map<std::string_view, Group> groups;
-    for (const auto &ti : *test_set) {
-        for (auto ptr = ti.test->groups; ptr && *ptr; ++ptr) {
-            Group &g = groups[(*ptr)->id];
-            g.definition = *ptr;
-            g.entries.push_back(ti.test);
-        }
-    }
-
-    return groups;
-}
-
-static void list_tests(bool include_tests, bool include_groups, bool include_descriptions)
-{
-    auto groups = collate_test_groups();
-    int i = 0;
-
-    for (const auto &ti : *test_set) {
-        struct test *test = ti.test;
-        if (test->quality_level >= sApp->requested_quality) {
-            if (include_tests) {
-                if (include_descriptions) {
-                    printf("%i %-20s \"%s\"\n", ++i, test->id, test->description);
-                } else if (sApp->shmem->verbosity > 0) {
-                    // don't report the FW minimum CPU features
-                    uint64_t cpuf = test->compiler_minimum_cpu & ~_compilerCpuFeatures;
-                    cpuf |= test->minimum_cpu;
-                    printf("%-20s %s\n", test->id, cpu_features_to_string(cpuf).c_str());
-                } else {
-                    puts(test->id);
-                }
-            }
-        }
-    }
-
-    if (include_groups && !groups.empty()) {
-        if (include_descriptions)
-            printf("\nGroups:\n");
-        for (auto pair : groups) {
-            const auto &g = pair.second;
-            if (include_descriptions) {
-                printf("@%-21s \"%s\"\n", g.definition->id, g.definition->description);
-                for (auto test : g.entries)
-                    if (test->quality_level >= sApp->requested_quality)
-                        printf("  %s\n", test->id);
-            } else {
-                // just the group name
-                printf("@%s\n", g.definition->id);
-            }
-        }
-    }
-}
-
-static void list_group_members(const char *groupname)
-{
-    auto groups = collate_test_groups();
-    for (auto pair : groups) {
-        const auto &g = pair.second;
-        if (groupname[0] == '@' && strcmp(g.definition->id, groupname + 1) == 0) {
-            for (auto test : g.entries)
-                printf("%s\n", test->id);
-            return;
-        }
-    }
-
-    fprintf(stderr, "No such group '%s'\n", groupname);
-    exit(EX_USAGE);
-}
 
 static bool should_start_next_iteration(void)
 {
@@ -2557,137 +2313,6 @@ static int exec_mode_run(int argc, char **argv)
     random_init_global(argv[1]);
 
     return test_result_to_exit_code(child_run(tests_to_run.at(0), child_number));
-}
-
-namespace {
-
-#define TO_STRING(x) #x
-
-enum class OutOfRangeMode { Exit, Saturate };
-template <typename Integer = int> struct ParseIntArgument
-{
-    static_assert(std::is_signed_v<Integer> || std::is_unsigned_v<Integer>);
-    using MaxInteger = std::conditional_t<std::is_signed_v<Integer>, long long, unsigned long long>;
-
-    const char *name = nullptr;
-    const char *explanation = nullptr;
-    MaxInteger min = 0;
-    MaxInteger max = std::numeric_limits<Integer>::max();
-    const int base = 10;
-    OutOfRangeMode range_mode = OutOfRangeMode::Exit;
-
-    void print_explanation() const
-    {
-        // i18n style guide says to never construct sentences...
-        if (explanation)
-            fprintf(stderr, "%s: value is %s\n", program_invocation_name, explanation);
-    }
-
-    void print_range_error(const char *arg) const
-    {
-        const char *severity = "warning";
-        if (range_mode == OutOfRangeMode::Exit)
-            severity = "error";
-        if constexpr (std::is_signed_v<Integer>) {
-            fprintf(stderr,
-                    "%s: %s: value out of range for option '%s': %s (minimum is %lld, maximum %lld)\n",
-                    program_invocation_name, severity, name, arg, min, max);
-        } else {
-            fprintf(stderr,
-                    "%s: %s: value out of range for option '%s': %s (minimum is %llu, maximum %llu)\n",
-                    program_invocation_name, severity, name, arg, min, max);
-        }
-        print_explanation();
-    }
-
-    Integer operator()(int arg) const
-    {
-        assert(min <= max);
-        assert(Integer(min) == min);
-        assert(Integer(max) == max);
-
-        // validate range
-        if (arg < min || arg > max) {
-            print_range_error(TO_STRING(arg));
-            if (range_mode == OutOfRangeMode::Exit)
-                exit(EX_USAGE);
-
-            if (arg < min)
-                arg = Integer(min);
-            else if (arg > max)
-                arg = Integer(max);
-        }
-        return arg;
-    }
-
-    // non-const because this usually comes from optarg anyway
-    Integer operator()(char *arg = optarg) const
-    {
-        assert(name);
-        assert(arg);
-        assert(min <= max);
-        assert(Integer(min) == min);
-        assert(Integer(max) == max);
-
-        char *end = arg;
-        errno = 0;
-        MaxInteger parsed;
-        if constexpr (std::is_signed_v<Integer>)
-            parsed = strtoll(arg, &end, base);
-        else
-            parsed = strtoull(arg, &end, base);
-
-        if (*end != '\0' || *arg == '\0') {
-            // strtoll() did not consume the entire string or there wasn't anything to consume,
-            // so it can't be valid
-            fprintf(stderr, "%s: invalid argument for option '%s': %s\n", program_invocation_name,
-                    name, arg);
-            print_explanation();
-            exit(EX_USAGE);
-        }
-
-        // validate range
-        Integer v = Integer(parsed);
-        bool erange = (errno == ERANGE);
-        if (erange || v != parsed || v < min || v > max) {
-            print_range_error(arg);
-            if (range_mode == OutOfRangeMode::Exit)
-                exit(EX_USAGE);
-
-            if (parsed < min || (erange && parsed == std::numeric_limits<long long>::min()))
-                v = Integer(min);
-            else if (v > max || (erange && parsed == std::numeric_limits<long long>::max()))
-                v = Integer(max);
-        }
-        return v;
-    }
-};
-} // unnamed namespace
-
-static auto parse_testrun_range(const char *arg, int &starting_test_number, int &ending_test_number)
-{
-    char *end;
-    errno = 0;
-    starting_test_number = strtoul(arg, &end, 10);
-    if (errno == 0) {
-        if (*end == '-')
-            ending_test_number = strtoul(end + 1, &end, 10);
-        else
-            errno = EINVAL;
-    }
-    if (errno != 0) {
-        fprintf(stderr, "%s: error: --test-range requires two dash separated integer args like --test-range 1-10\n",
-                program_invocation_name);
-        return EXIT_FAILURE;
-    }
-    if (starting_test_number > ending_test_number)
-        std::swap(starting_test_number, ending_test_number);
-    if (starting_test_number < 1) {
-        fprintf(stderr, "%s: error: The lower bound of the test range must be >= 1, %d specified\n",
-                program_invocation_name, starting_test_number);
-        return EXIT_FAILURE;
-    }
-    return EXIT_SUCCESS;
 }
 
 
@@ -3014,74 +2639,19 @@ skip_wait:
     return true;
 }
 
-namespace {
-void validate_excludes_with(const po::variables_map& vm, const char* this_opt, std::vector<const char*> opts) {
-    for (auto opt: opts) {
-        if (vm.count(opt)) {
-            fprintf(stderr, "Error parsing options: options %s and %s are mutually exclusive\n", this_opt, opt);
-            // suggest_help();
-            exit(EX_USAGE); // is this a good idea to exit?
-        }
-    }
-}
-
-class VerbosityCounter : public po::typed_value<int>
-{
-public:
-    VerbosityCounter():
-        VerbosityCounter(nullptr)
-    {}
-
-    VerbosityCounter(int* store):
-        po::typed_value<int>(store)
-    {
-        default_value(0);
-        zero_tokens();
-    }
-
-    virtual ~VerbosityCounter()
-    {}
-
-    virtual void xparse(boost::any& store, const std::vector<std::string>& /*tokens*/) const
-    {
-        // TODO set some saturation threshold
-        store = boost::any(++count);
-    }
-
-private:
-    mutable int count = 0;
-};
+static void suggest_help(char **argv) {
+    printf("Try '%s --help' for more information.\n", argv[0]);
 }
 
 extern constexpr const uint64_t minimum_cpu_features = _compilerCpuFeatures;
-int main(int argc, char **argv)
+int sandstone_main(int argc, char **argv)
 {
     // initialize the main application
     new (sApp) SandstoneApplication;
 
-    std::string seed;
-    int max_cores_per_slice = 0;
     int total_failures = 0;
     int total_successes = 0;
     int total_skips = 0;
-    int thread_count = -1;
-    bool fatal_errors = false;
-    std::string on_hang_arg;
-    std::string on_crash_arg;
-
-    // test selection
-    std::vector<std::string> enabled_tests;
-    std::vector<std::string> disabled_tests;
-    std::string test_list_file_path;
-
-    struct test_set_cfg test_set_config = {
-        .ignore_unknown_tests = false,
-        .randomize = false,
-        .cycle_through = false,
-    };
-    const char* builtin_test_list_name = nullptr;
-    int starting_test_number = 1;  // One based count for user interface, not zero based
-    int ending_test_number = INT_MAX;
 
     thread_num = -1;            /* indicate main thread */
     find_thyself(argv[0]);
@@ -3105,437 +2675,30 @@ int main(int argc, char **argv)
         init_topology(std::move(enabled_cpus));
     }
 
-    po::options_description desc("Options");
-    desc.add_options()
-        ("help,h", po::value<bool>()->implicit_value(true)->zero_tokens(), "Show help and exit") // use value<bool> rather than bool_switch to further use vm.count() (for bool_switch vm.count() is always true)
-        ("enable,e", po::value<std::vector<std::string>>(&enabled_tests)->multitoken()->composing(), "Enabled tests")
-        ("disable", po::value<std::vector<std::string>>(&disabled_tests)->multitoken()->composing(), "Disabled tests")
-        ("test-list-randomize", po::bool_switch(&test_set_config.randomize), "Randomize test list")
-        ("max-messages", po::value<int>(), "Maximum number of messages (per thread) to log in each test (0 is unlimited)")
-        ("no-slicing", po::value<bool>()->implicit_value(true)->zero_tokens(), "No slicing")
-        ("beta", po::value<bool>()->implicit_value(true)->zero_tokens(), "Beta tests")
-        ("quality", po::value<int>(), "Quality")
-        ("rng-state,s", po::value<std::string>(&seed), "Seed")
-        ("quiet,q", po::value<bool>()->implicit_value(true)->zero_tokens(), "Quiet mode")
-        ("fatal-errors,F", po::bool_switch(&fatal_errors), "Fatal errors")
-        ("output-log,o", po::value<std::string>(&sApp->file_log_path), "File log path")
-        ("test-option,O", po::value<std::string>()->multitoken(), "Test option")
-        ("time,t", po::value<std::string>(), "Time")
-        ("total-time,T", po::value<std::string>(), "Total time")
-        ("verbose,v", new VerbosityCounter(&sApp->shmem->verbosity), "Verbosity")
-        ("force-test-time", po::bool_switch(&sApp->force_test_time), "Force test time")
-        ("timeout", po::value<std::string>(), "Timeout")
-        ("dump-cpu-info", po::value<bool>()->implicit_value(true)->zero_tokens(), "Dump CPU info and exit")
-        ("on-hang", po::value<std::string>(&on_hang_arg), "On hang")
-        ("on-crash", po::value<std::string>(&on_crash_arg), "On crash")
-        ("ignore-os-errors", po::bool_switch(&sApp->ignore_os_errors), "Ignore OS errors")
-        ("ignore-timeout", po::bool_switch(&test_set_config.ignore_unknown_tests), "Ignore timeout")
-        ("threads,n", po::value<int>(), "Number of threads")
-        ("list,l", po::value<bool>()->implicit_value(true)->zero_tokens(), "List")
-        ("list-tests", po::value<bool>()->implicit_value(true)->zero_tokens(), "List tests")
-        ("list-groups", po::value<bool>()->implicit_value(true)->zero_tokens(), "List groups")
-        ("list-group-members", po::value<bool>()->implicit_value(true)->zero_tokens(), "List group members")
-        ("yaml,Y", po::value<int>(), "YAML indentation")
-        ("cpuset", po::value<std::string>(), "Cpuset")
-        ("max-cores-per-slice", po::value<int>(), "Max cores per slice")
-        ("mce-check-every", po::value<int>(&sApp->mce_check_period), "Mce check period")
-        ("output-format", po::value<std::string>(), "Output format")
-        ("quick", po::value<bool>()->implicit_value(true)->zero_tokens(), "Quick run")
-        ("strict-runtime", po::bool_switch(&sApp->shmem->use_strict_runtime), "Strict runtime")
-        ("retest-on-failure", po::value<int>(), "Retest on failure")
-        ("syslog", po::value<bool>()->implicit_value(true)->zero_tokens(), "Syslog")
-        ("service", po::value<bool>()->implicit_value(true)->zero_tokens(), "Service")
-        ("ud-on-failure", po::bool_switch(&sApp->shmem->ud_on_failure), "UD on failure")
-        ("use-builtin-test-list", po::value<std::string>()->implicit_value(std::string{}), "Use built-in test list")
-        ("temperature-threshold", po::value<std::string>(), "Temperature threshold")
-        ("test-delay", po::value<std::string>(), "Test delay")
-        ("test-tests", po::value<bool>()->implicit_value(true)->zero_tokens(), "Test tests")
-        ("total-retest-on-failure", po::value<int>(), "Total retest on failure")
-        ("test-list-file", po::value<std::string>(&test_list_file_path), "Test list file")
-        ("fork-mode,f", po::value<std::string>(), "Fork mode")
-        ("test-range", po::value<std::string>(), "Test range")
-        ("max-logdata", po::value<int>(), "Max log data")
-        ("vary-frequency", po::value<bool>()->implicit_value(true)->zero_tokens(), "Vary frequency")
-        ("vary-uncore-frequency", po::value<bool>()->implicit_value(true)->zero_tokens(), "Vary uncore frequency")
-        ("version", po::value<bool>()->implicit_value(true)->zero_tokens(), "Show version")
-        ("1sec", po::value<bool>()->implicit_value(true)->zero_tokens(), "1 sec")
-        ("30sec", po::value<bool>()->implicit_value(true)->zero_tokens(), "30 sec")
-        ("2min", po::value<bool>()->implicit_value(true)->zero_tokens(), "2 min")
-        ("5min", po::value<bool>()->implicit_value(true)->zero_tokens(), "5 min")
-        ("max-test-count", po::value<int>(), "Max test count")
-        ("max-test-loop-count", po::value<int>(), "Max test loop count")
-        ("longer-runtime", po::value<std::string>(), "Deprecated")
-        ("max-concurrent-threads", po::value<std::string>(), "Deprecated")
-        ("no-triage", po::value<std::string>(), "Deprecated")
-        ("triage", po::value<std::string>(), "Deprecated")
-        ("schedule-by", po::value<std::string>(), "Deprecated")
-        ("shorten-runtime", po::value<std::string>(), "Deprecated")
-        ("weighted-testrun-type", po::value<std::string>(), "Deprecated")
-        ("mem-sample-time", po::value<std::string>(), "Deprecated")
-        ("mem-samples-per-log", po::value<std::string>(), "Deprecated")
-        ("no-memory-sampling", po::value<std::string>(), "Deprecated")
-#ifndef NDEBUG
-        ("gdb-server", po::value<std::string>(&sApp->gdb_server_comm), "GDB Server")
-        ("is-debug-build", po::value<bool>(), "Is debug build") // TODO just exit ?
-#endif
-#if defined(__SANITIZE_ADDRESS__)
-        ("is-asan-build", po::value<bool>(), "Is ASAN build") // TODO just exit ?
-#endif
-#ifndef NO_SELF_TESTS
-        ("selftests", po::value<bool>()->implicit_value(true)->zero_tokens(), "Self tests")
-#endif
-    ;
-
-    po::options_description desc_no_cmd("Options");
-    desc_no_cmd.add_options()
-        ("help,h", po::value<bool>()->implicit_value(true)->zero_tokens(), "Show help and exit")
-        ("query", po::value<bool>()->implicit_value(true)->zero_tokens(), "Show version")
-        ("service", po::value<bool>()->implicit_value(true)->zero_tokens(), "Service")
-        ("version", po::value<bool>()->implicit_value(true)->zero_tokens(), "Show version")
-    ;
-
-    if (!SandstoneConfig::RestrictedCommandLine) {
-        // parse
-        po::variables_map vm;
-        try {
-            po::store(po::parse_command_line(argc, argv, desc), vm);
-            po::notify(vm);
-        } catch (po::error& e) {
-            fprintf(stderr, "Error parsing options: %s\n", e.what());
-            return EXIT_FAILURE;
-        } catch (std::exception& e) {
-            fprintf(stderr, "Caught C++ exception: \"%s\" (type '%s')\n", e.what(), typeid(e).name());
-            return EXIT_FAILURE;
-        }
-
-        // validate
-        if (vm.count("help")) {
-            validate_excludes_with(vm, "help", {"dump-cpu-info", "list", "list-tests", "list-groups", "list-group-members", "version"});
-            usage(argv);
+    std::unique_ptr<ParsedOpts> opts;
+    try {
+        opts = parse_and_validate(argc, argv, sApp);
+        if (!opts) {
+            // early exit
             return EXIT_SUCCESS;
         }
-        if (vm.count("dump-cpu-info")) {
-            validate_excludes_with(vm, "dump-cpu-info", {"help", "list", "list-tests", "list-groups", "list-group-members", "version"});
-            dump_cpu_info();
-            return EXIT_SUCCESS;
-        }
-        if (vm.count("list") || vm.count("list-tests") || vm.count("list-groups")) {
-            validate_excludes_with(vm, "list", {"help", "dump-cpu-info", "list-group-members", "version"});
-            test_set = new SandstoneTestSet(test_set_config, SandstoneTestSet::enable_all_tests);
-            list_tests(!vm.count("list-groups"), !vm.count("list-tests"), vm.count("list"));
-            return EXIT_SUCCESS;
-        }
-        if (vm.count("list-group-members")) {
-            validate_excludes_with(vm, "list-group-members", {"help", "dump-cpu-info", "list", "list-tests", "list-groups", "version"});
-            test_set = new SandstoneTestSet(test_set_config, SandstoneTestSet::enable_all_tests);
-            list_group_members(vm["list-group-members"].as<char*>());
-            return EXIT_SUCCESS;
-        }
-        if (vm.count("version")) {
-            validate_excludes_with(vm, "version", {"help", "dump-cpu-info", "list", "list-tests", "list-groups", "list-group-members"});
-            logging_print_version();
-            return EXIT_SUCCESS;
-        }
-
-        if (vm.count("no-slicing")) {
-            validate_excludes_with(vm, "no-slicing", {"max-cores-per-slice"});
-            max_cores_per_slice = -1;
-        }
-        if (vm.count("beta")) {
-            validate_excludes_with(vm, "beta", {"quality"});
-            sApp->requested_quality = 0;
-        }
-        if (vm.count("quality")) {
-            validate_excludes_with(vm, "quality", {"beta"});
-            sApp->requested_quality = ParseIntArgument<>{
-                    .name = "--quality",
-                    .min = -1000,
-                    .max = +1000,
-                    .range_mode = OutOfRangeMode::Saturate
-            }(vm["quality"].as<int>());
-        }
-        if (vm.count("max-messages")) {
-            sApp->shmem->max_messages_per_thread = ParseIntArgument<>{
-                    .name = "max-messages",
-                    .min = -1,
-                    .range_mode = OutOfRangeMode::Saturate
-            }(vm["max-messages"].as<int>());
-            if (sApp->shmem->max_messages_per_thread <= 0) { // TODO introduce new OutOfRangeMode::SaturateWithMax to handle this case?
-                sApp->shmem->max_messages_per_thread = INT_MAX;
-            }
-            printf("max-messages %d\n", sApp->shmem->max_messages_per_thread);
-        }
-        if (vm.count("quiet")) {
-            validate_excludes_with(vm, "quiet", {"verbose"});
-            sApp->shmem->verbosity = 0;
-        }
-        if (vm.count("test-option")) {
-            sApp->shmem->log_test_knobs = true;
-            auto values = vm["test-option"].as<std::vector<std::string>>();
-            for (const auto& value: values) {
-                if (!set_knob_from_key_value_string(value.c_str())){
-                    fprintf(stderr, "Malformed test knob: %s (should be in the form KNOB=VALUE)\n", value.c_str());
-                    return EX_USAGE;
-                }
-            }
-        }
-        if (vm.count("time")) {
-            sApp->test_time = string_to_millisecs(vm["time"].as<std::string>());
-        }
-        if (vm.count("total-time")) {
-            auto value = vm["total-time"].as<std::string>();
-            if (strcmp(value.c_str(), "forever") == 0) {
-                sApp->endtime = MonotonicTimePoint::max();
-            } else {
-                sApp->endtime = sApp->starttime + string_to_millisecs(value);
-            }
-            test_set_config.cycle_through = true; /* Time controls when the execution stops as
-                                                        opposed to the number of tests. */
-        }
-        if (vm.count("timeout")) {
-            sApp->max_test_time = string_to_millisecs(vm["timeout"].as<std::string>());
-        }
-        if (vm.count("threads")) {
-            thread_count = ParseIntArgument<>{
-                .min = 1,
-                .max = sApp->thread_count,
-                .range_mode = OutOfRangeMode::Saturate
-            }(vm["threads"].as<int>());
-        }
-        if (vm.count("yaml")) {
-            sApp->shmem->output_format = SandstoneApplication::OutputFormat::yaml;
-            if (!vm["yaml"].defaulted())
-                sApp->shmem->output_yaml_indent = ParseIntArgument<>{
-                    .max = 160,     // arbitrary
-                }(vm["yaml"].as<int>());
-        }
-        if (vm.count("cpuset")) {
-            apply_cpuset_param(vm["cpuset"].as<char*>());
-        }
-        if (vm.count("max-cores-per-slice")) {
-            validate_excludes_with(vm, "max-cores-per-slice", {"no-slicing"});
-            max_cores_per_slice = ParseIntArgument<>{
-                .name = "--max-cores-per-slice",
-                .min = -1,
-            }(vm["max-cores-per-slice"].as<int>());
-        }
-        if (vm.count("output-format")) {
-            auto value = vm["output-format"].as<std::string>();
-            if (value == "key-value") {
-                sApp->shmem->output_format = SandstoneApplication::OutputFormat::key_value;
-            } else if (value == "tap") {
-                sApp->shmem->output_format = SandstoneApplication::OutputFormat::tap;
-            } else if (value == "yaml") {
-                sApp->shmem->output_format = SandstoneApplication::OutputFormat::yaml;
-            } else if (SandstoneConfig::Debug && value == "none") {
-                // for testing only
-                sApp->shmem->output_format = SandstoneApplication::OutputFormat::no_output;
-                sApp->shmem->verbosity = -1; // TODO should it ovewrite verbose/quiet or throw mutually exclusive?
-            } else {
-                fprintf(stderr, "%s: unknown output format: %s\n", argv[0], value.c_str());
-                return EX_USAGE;
-            }
-        }
-        if (vm.count("quick")) {
-            sApp->max_test_loop_count = 1;
-            sApp->delay_between_tests = 0ms;
-        }
-        if (vm.count("retest-on-failure")) {
-            sApp->retest_count = ParseIntArgument<>{
-                    .name = "--retest-on-failure",
-                    .max = SandstoneApplication::MaxRetestCount,
-                    .range_mode = OutOfRangeMode::Saturate
-            }(vm["retest-on-failure"].as<int>());
-        }
-        if (vm.count("syslog")) {
-            sApp->syslog_ident = program_invocation_name;
-        }
-        if (vm.count("service")) {
-            // keep in sync with RestrictedCommandLine below
-            fatal_errors = true;
-            sApp->endtime = MonotonicTimePoint::max();
-            sApp->service_background_scan = true;
-        }
-        if (vm.count("use-builtin-test-list")) {
-            auto value = vm["use-builtin-test-list"].as<char*>();
-            if (!SandstoneConfig::HasBuiltinTestList) {
-                fprintf(stderr, "%s: --use-builtin-test-list specified but this build does not "
-                                "have a built-in test list.\n", argv[0]);
-                return EX_USAGE;
-            }
-            builtin_test_list_name = value ? value : "auto";
-        }
-        if (vm.count("temperature-threshold")) {
-            if (vm["temperature-threshold"].as<std::string>() == "disable") {
-                sApp->thermal_throttle_temp = -1;
-            } else {
-                sApp->thermal_throttle_temp = ParseIntArgument<>{
-                    .name = "--temperature-threshold",
-                    .explanation = "value should be specified in thousands of degrees Celsius "
-                                    "(for example, 85000 is 85 degrees Celsius), or \"disable\" "
-                                    "to disable monitoring",
-                    .max = 160000,      // 160 C is WAAAY too high anyway
-                    .range_mode = OutOfRangeMode::Saturate
-                }(vm["temperature-threshold"].as<char*>());
-            }
-        }
-        if (vm.count("test-delay")) {
-            sApp->delay_between_tests = string_to_millisecs(vm["test-delay"].as<char*>());
-        }
-        if (vm.count("test-tests")) {
-            sApp->enable_test_tests();
-            if (sApp->test_tests_enabled()) {
-                // disable other options that don't make sense in this mode
-                sApp->retest_count = 0;
-            }
-        }
-        if (vm.count("total-retest-on-failure")) {
-            sApp->total_retest_count = ParseIntArgument<>{
-                    .name = "--total-retest-on-failure",
-                    .min = -1
-            }(vm["total-retest-on-failure"].as<int>());
-        }
-        if (vm.count("fork-mode")) {
-            auto value = vm["fork-mode"].as<std::string>();
-            if (value == "no" || value == "no-fork") {
-                sApp->fork_mode = SandstoneApplication::no_fork;
-            } else if (value == "exec") {
-                sApp->fork_mode = SandstoneApplication::exec_each_test;
-#ifndef _WIN32
-            } else if (value == "yes" || value == "each-test") {
-                sApp->fork_mode = SandstoneApplication::fork_each_test;
-#endif
-            } else {
-                fprintf(stderr, "%s: unknown option to -f: %s\n", argv[0], value.c_str());
-                usage(argv);
-                return EX_USAGE;
-            }
-        }
-        if (vm.count("test-range")) {
-            if (parse_testrun_range(vm["test-range"].as<char*>(), starting_test_number, ending_test_number) == EXIT_FAILURE) {
-                return EX_USAGE;
-            }
-        }
-        if (vm.count("max-logdata")) {
-            sApp->shmem->max_logdata_per_thread = ParseIntArgument<unsigned>{
-                    .name = "--max-logdata",
-                    .explanation = "maximum number of bytes of test's data to log per thread (0 is unlimited))",
-                    .base = 0,      // accept hex
-                    .range_mode = OutOfRangeMode::Saturate
-            }(vm["max-logdata"].as<int>());
-            if (sApp->shmem->max_logdata_per_thread == 0) { // here OutOfRangeMode::SaturateWithMax as well?
-                sApp->shmem->max_logdata_per_thread = UINT_MAX;
-            }
-        }
-        if (vm.count("vary-frequency")) {
-            if (!FrequencyManager::FrequencyManagerWorks) {
-                fprintf(stderr, "%s: --vary-frequency works only on Linux\n", program_invocation_name);
-                return EX_USAGE;
-            }
-            sApp->vary_frequency_mode = true;
-        }
-        if (vm.count("vary-uncore-frequency")) {
-            if (!FrequencyManager::FrequencyManagerWorks) {
-                fprintf(stderr, "%s: --vary-uncore-frequency works only on Linux\n", program_invocation_name);
-                return EX_USAGE;
-            }
-            sApp->vary_uncore_frequency_mode = true;
-        }
-        if (vm.count("1sec") || vm.count("30sec") || vm.count("2min") || vm.count("5min")) { // they should be mutually exclusive
-            test_set_config.randomize = true;
-            test_set_config.cycle_through = true;
-            sApp->shmem->use_strict_runtime = true;
-            if (vm.count("1sec"))       sApp->endtime = sApp->starttime + 1s;
-            else if (vm.count("30sec")) sApp->endtime = sApp->starttime + 30s;
-            else if (vm.count("2min"))  sApp->endtime = sApp->starttime + 2min;
-            else if (vm.count("5min"))  sApp->endtime = sApp->starttime + 5min;
-        }
-        if (vm.count("max-test-count")) {
-            sApp->max_test_count = ParseIntArgument<>{"--max-test-count"}(vm["max-test-count"].as<int>());
-        }
-        if (vm.count("max-test-loop-count")) {
-            sApp->max_test_loop_count = ParseIntArgument<>{"--max-test-loop-count"}(vm["max-test-loop-count"].as<int>());
-            if (sApp->max_test_loop_count == 0) {
-                sApp->max_test_loop_count = std::numeric_limits<int>::max();
-            }
-        }
-        // deprecated
-        if (vm.count("longer-runtime") || vm.count("max-concurrent-threads") || vm.count("no-triage") ||
-            vm.count("triage") || vm.count("schedule-by") || vm.count("shorten-runtime") || vm.count("weighted-testrun-type") ||
-            vm.count("mem-sample-time") || vm.count("mem-samples-per-log") || vm.count("no-memory-sampling"))
-        {
-            fprintf(stderr, "%s: option is ignored and will be removed in a future version.\n",
-                program_invocation_name);
-        }
-
-#ifndef NO_SELF_TESTS
-        if (vm.count("selftests")) {
-            if (vm.count("beta") || vm.count("quality")) {
-                fprintf(stderr, "%s: --selftest is incompatible with --beta or --quality.\n", argv[0]);
-                return EX_USAGE;
-            }
-            sApp->requested_quality = 0;
-            sApp->shmem->selftest = true;
-            test_set_config.is_selftest = true;
-        }
-#endif
+    // TODO: differentiate between po::error (parsing) and std::invalid_argument (validation) exceptions?
+    } catch (std::exception& e) {
+        printf("Error parsing options: %s\n", e.what());
+        suggest_help(argv);
+        return EX_USAGE;
     }
 
     if (SandstoneConfig::RestrictedCommandLine) {
-        // Default options for the simplified OpenDCDiag cmdline
-
-        // parse
-        po::variables_map vm;
-        try {
-            po::store(po::parse_command_line(argc, argv, desc_no_cmd), vm);
-            po::notify(vm);
-        } catch (po::error& e) {
-            fprintf(stderr, "Error parsing options: %s\n", e.what());
-            return EXIT_FAILURE;
-        } catch (std::exception& e) {
-            fprintf(stderr, "Caught C++ exception: \"%s\" (type '%s')\n", e.what(), typeid(e).name());
-            return EXIT_FAILURE;
-        }
-
-        // validate
-        if (vm.count("help")) {
-            usage(argv);
-            return EXIT_SUCCESS;
-        }
-        if (vm.count("query")) {
-            // ### FIXME
-            fprintf(stderr, "%s: --query not implemented yet\n", argv[0]);
-            abort();
-        }
-        if (vm.count("service")) {
-            // keep in sync above
-            sApp->endtime = MonotonicTimePoint::max();
-            sApp->service_background_scan = true;
-        }
-        if (vm.count("version")) {
-            logging_print_version();
-            return EXIT_SUCCESS;
-        }
-
-        if (SandstoneConfig::NoLogging) {
-            sApp->shmem->output_format = SandstoneApplication::OutputFormat::no_output;
-        } else  {
-            sApp->shmem->verbosity = 1;
-        }
-
         sApp->delay_between_tests = 50ms;
         sApp->thermal_throttle_temp = INT_MIN;
-        fatal_errors = true;
-        builtin_test_list_name = "auto";
+        opts->fatal_errors = true;
+        opts->builtin_test_list_name = "auto";
 
         static_assert(!SandstoneConfig::RestrictedCommandLine || SandstoneConfig::HasBuiltinTestList,
                 "Restricted command-line build must have a built-in test list");
     }
 
-    if (optind < argc) {
-        usage(argv);
-        return EX_USAGE;
-    }
     if (sApp->shmem->log_test_knobs && sApp->current_fork_mode() == SandstoneApplication::exec_each_test) {
         fprintf(stderr, "%s: error: --test-option is not supported in this configuration\n",
                 program_invocation_name);
@@ -3545,50 +2708,50 @@ int main(int argc, char **argv)
     if (sApp->total_retest_count < -1 || sApp->retest_count == 0)
         sApp->total_retest_count = 10 * sApp->retest_count; // by default, 100
 
-    if (unsigned(thread_count) < unsigned(sApp->thread_count))
-        restrict_topology({ 0, thread_count });
-    slice_plan_init(max_cores_per_slice);
+    if (unsigned(opts->thread_count) < unsigned(sApp->thread_count))
+        restrict_topology({ 0, opts->thread_count });
+    slice_plan_init(opts->max_cores_per_slice);
     commit_shmem();
 
     signals_init_global();
     resource_init_global();
     debug_init_global(
-        !on_hang_arg.empty() ? on_hang_arg.c_str() : nullptr,
-        !on_crash_arg.empty() ? on_crash_arg.c_str() : nullptr
+        !opts->on_hang_arg.empty() ? opts->on_hang_arg.c_str() : nullptr,
+        !opts->on_crash_arg.empty() ? opts->on_crash_arg.c_str() : nullptr
     );
     pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, nullptr);
 
     print_application_banner();
     logging_init_global();
     cpu_specific_init();
-    random_init_global(!seed.empty() ? seed.c_str() : nullptr);
+    random_init_global(!opts->seed.empty() ? opts->seed.c_str() : nullptr);
     background_scan_init();
 
-    if (enabled_tests.size() || builtin_test_list_name || !test_list_file_path.empty()) {
+    if (opts->enabled_tests.size() || opts->builtin_test_list_name || !opts->test_list_file_path.empty()) {
         /* if anything other than the "all tests" has been specified, start with
          * an empty list. */
-        test_set = new SandstoneTestSet(test_set_config, 0);
+        test_set = new SandstoneTestSet(opts->test_set_config, 0);
     } else {
         /* otherwise, start with all the applicable tests (self tests or
          * regular. */
-        test_set = new SandstoneTestSet(test_set_config, SandstoneTestSet::enable_all_tests);
+        test_set = new SandstoneTestSet(opts->test_set_config, SandstoneTestSet::enable_all_tests);
     }
 
     /* Add all the tests we were told to enable. */
-    for (const auto& name : enabled_tests) {
+    for (const auto& name : opts->enabled_tests) {
         auto tis = test_set->add(name.c_str());
-        if (!tis.size() && !test_set_config.ignore_unknown_tests) {
+        if (!tis.size() && !opts->test_set_config.ignore_unknown_tests) {
             fprintf(stderr, "%s: Cannot find matching tests for '%s'\n", program_invocation_name, name.c_str());
             exit(EX_USAGE);
         }
     }
 
     /* Add the test list file */
-    if (!test_list_file_path.empty()) {
+    if (!opts->test_list_file_path.empty()) {
         std::vector<std::string> errors;
-        test_set->add_test_list(test_list_file_path.c_str(), errors);
+        test_set->add_test_list(opts->test_list_file_path.c_str(), errors);
         if (!errors.empty()) {
-            fprintf(stderr, "Error loading test list file %s:\n", test_list_file_path.c_str());
+            fprintf(stderr, "Error loading test list file %s:\n", opts->test_list_file_path.c_str());
             for (auto i = errors.begin(); i != errors.end(); i++) {
                 fprintf(stderr, "    %s\n", (*i).c_str());
             }
@@ -3596,9 +2759,9 @@ int main(int argc, char **argv)
         }
     }
 
-    if (builtin_test_list_name) {
+    if (opts->builtin_test_list_name) {
         std::vector<std::string> errors;
-        test_set->add_builtin_test_list(builtin_test_list_name, errors);
+        test_set->add_builtin_test_list(opts->builtin_test_list_name, errors);
         if (!errors.empty()) {
             // FIXME: handle errors
             ;
@@ -3612,7 +2775,7 @@ int main(int argc, char **argv)
     test_set->add(&mce_test);
 
     /* Remove all the tests we were told to disable */
-    for (const auto& name : disabled_tests) {
+    for (const auto& name : opts->disabled_tests) {
         test_set->remove(name.c_str());
     }
 
@@ -3682,7 +2845,7 @@ int main(int argc, char **argv)
         total_tests_run++;
         if (lastTestResult == TestResult::Failed) {
             ++total_failures;
-            if (fatal_errors)
+            if (opts->fatal_errors)
                 break;
         } else if (lastTestResult == TestResult::Passed) {
             ++total_successes;

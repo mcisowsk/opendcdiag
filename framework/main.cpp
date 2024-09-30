@@ -108,17 +108,12 @@ noexec:
 static void fallback_exec(char **) {}
 #endif
 
-extern "C" {
-__attribute__((constructor(101), used))
-static void premain(int argc, char **argv, char **envp)
+int main(int argc, char **argv)
 {
-    (void) argc;
-    (void) envp;
-
     // initialize CPU detection
     cpu_features = detect_cpu();
     if (minimum_cpu_features & ~cpu_features)
         fallback_exec(argv);
     check_missing_features(cpu_features, minimum_cpu_features);
-}
+    return sandstone_main(argc, argv);
 }

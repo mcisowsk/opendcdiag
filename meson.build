@@ -261,16 +261,20 @@ executable(
     ],
 )
 
+# TODO: for some reason unittests target cannot find forkfd/forkfd.c, must be done separately here
+if target_machine.system() != 'windows' and target_machine.system() != 'cygwin'
+unittests_sources += [
+    'framework/forkfd/forkfd.c'
+]
+endif
+
 executable(
     'unittests',
-    files(
-        'framework/sysdeps/linux/malloc.cpp',
-        'framework/sandstone_unittests_utils.cpp',
-    ),
     unittests_sources,
     dependencies: [
         gtest_dep,
-        pthread_dep
+        pthread_dep,
+        boost_dep,
     ],
     include_directories : [
         framework_incdir,
@@ -279,9 +283,9 @@ executable(
         '-march=haswell',
         debug_c_flags,
         default_cpp_warn,
-	'-USANDSTONE',
+        '-USANDSTONE',
     ],
-    build_by_default : false,
+    build_by_default : true,
     native : true,
 )
 

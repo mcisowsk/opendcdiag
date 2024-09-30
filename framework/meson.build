@@ -87,6 +87,7 @@ framework_files = files(
     'sandstone_tests.cpp',
     'sandstone_test_groups.cpp',
     'sandstone_thread.cpp',
+    'sandstone_opts.cpp',
     'sandstone_utils.cpp',
     'static_vectors.c',
     'test_knobs.cpp',
@@ -121,8 +122,9 @@ else
     default_cpp_flags += [ '-DNO_SELF_TESTS', ]
 endif
 
+forkfd_files = [] # TODO: for some reason unittests target cannot find forkfd/forkfd.c when added to framework_files here
 if target_machine.system() != 'windows' and target_machine.system() != 'cygwin'
-framework_files += [
+forkfd_files += [
     'forkfd/forkfd.c',
 ]
 endif
@@ -165,6 +167,7 @@ framework_a = static_library(
     framework_files,
     generated_builtin_test_list,
     generated_cpu_features_h,
+    forkfd_files, # TODO: workaround, it should be part of framework_files
     build_by_default: false,
     include_directories : [
         framework_incdir,
@@ -190,15 +193,16 @@ framework_a = static_library(
 )
 
 unittests_sources += files(
-    'sandstone_chrono.cpp',
-    'sandstone_data.cpp',
-    'sandstone_utils.cpp',
-    'test_knobs.cpp',
     'unit-tests/sandstone_data_tests.cpp',
     'unit-tests/sandstone_test_utils_tests.cpp',
     'unit-tests/sandstone_utils_tests.cpp',
+    'unit-tests/sandstone_opts_tests.cpp',
     'unit-tests/tests_dummy.cpp',
     'unit-tests/test_knob_tests.cpp',
     'unit-tests/thermal_monitor_tests.cpp',
     'unit-tests/topology_tests.cpp',
-)
+) + [
+    framework_files,
+    generated_builtin_test_list,
+    generated_cpu_features_h,
+]
