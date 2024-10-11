@@ -2672,9 +2672,14 @@ int main(int argc, char **argv)
     }
 
     ParsedOpts opts;
-    auto ret = parse_cmdline(argc, argv, sApp, opts);
-    if (ret == EXIT_SUCCESS || ret == EX_USAGE) {
-        return ret;
+    try {
+        auto ret = parse_cmdline(argc, argv, sApp, opts);
+        if (ret == EXIT_SUCCESS || ret == EX_USAGE) {
+            return ret;
+        }
+    } catch (std::invalid_argument& e) {
+        fprintf(stderr, "Error while parsing opts: %s\n", e.what());
+        return EX_USAGE;
     }
 
     if (sApp->shmem->log_test_knobs && sApp->current_fork_mode() == SandstoneApplication::exec_each_test) {
