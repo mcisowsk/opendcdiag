@@ -2240,10 +2240,7 @@ static bool should_start_next_iteration(void)
 static SandstoneTestSet::EnabledTestList::iterator get_first_test()
 {
     logging_print_iteration_start();
-    auto it = test_set->begin();
-    while (it != test_set->end() && it->test->quality_level < sApp->requested_quality)
-        ++it;
-    return it;
+    return test_set->begin();
 }
 
 
@@ -2254,8 +2251,6 @@ get_next_test(SandstoneTestSet::EnabledTestList::iterator next_test)
         return test_set->end();
 
     ++next_test;
-    while (next_test != test_set->end() && next_test->test->quality_level < sApp->requested_quality)
-        ++next_test;
     if (next_test == test_set->end()) {
         if (should_start_next_iteration()) {
             return get_first_test();
@@ -2714,10 +2709,10 @@ int main(int argc, char **argv)
 
     /* Add all the tests we were told to enable. */
     if (opts.enabled_tests.size()) {
-        for (auto name : opts.enabled_tests) {
-            auto tis = test_set->add(name);
+        for (const auto& candidate : opts.enabled_tests) {
+            auto tis = test_set->add(candidate);
             if (!tis.size() && !opts.test_set_config.ignore_unknown_tests) {
-                fprintf(stderr, "%s: Cannot find matching tests for '%s'\n", program_invocation_name, name);
+                fprintf(stderr, "%s: Cannot find matching tests for '%s'\n", program_invocation_name, candidate.name);
                 exit(EX_USAGE);
             }
         }

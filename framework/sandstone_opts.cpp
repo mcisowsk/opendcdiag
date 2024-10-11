@@ -83,6 +83,8 @@ enum {
     vary_uncore_frequency,
     version_option,
     weighted_testrun_option,
+    alpha_option,
+    beta_option,
 };
 
 void suggest_help(char **argv) {
@@ -438,8 +440,8 @@ int parse_cmdline(int argc, char** argv, SandstoneApplication* app, ParsedOpts& 
         { "30sec", no_argument, nullptr, thirty_sec_option },
         { "2min", no_argument, nullptr, two_min_option },
         { "5min", no_argument, nullptr, five_min_option },
-        { "alpha", no_argument, &app->requested_quality, INT_MIN },
-        { "beta", no_argument, &app->requested_quality, 0 },
+        { "alpha", no_argument, nullptr, alpha_option },
+        { "beta", no_argument, nullptr, beta_option },
         { "cpuset", required_argument, nullptr, cpuset_option },
         { "disable", required_argument, nullptr, disable_option },
         { "dump-cpu-info", no_argument, nullptr, dump_cpu_info_option },
@@ -522,6 +524,7 @@ int parse_cmdline(int argc, char** argv, SandstoneApplication* app, ParsedOpts& 
 
     int opt;
     int coptind = -1;
+    int current_quality_value = app->DefaultQualityLevel;
 
     while (!SandstoneConfig::RestrictedCommandLine &&
         (opt = simple_getopt(argc, argv, long_options, &coptind)) != -1) {
@@ -530,7 +533,7 @@ int parse_cmdline(int argc, char** argv, SandstoneApplication* app, ParsedOpts& 
             opts.disabled_tests.push_back(optarg);
             break;
         case 'e':
-            opts.enabled_tests.push_back(optarg);
+            opts.enabled_tests.emplace_back(optarg, current_quality_value);
             break;
         case 'f':
             if (strcmp(optarg, "no") == 0 || strcmp(optarg, "no-fork") == 0) {
@@ -680,8 +683,14 @@ int parse_cmdline(int argc, char** argv, SandstoneApplication* app, ParsedOpts& 
             }
             break;
 
+        case alpha_option:
+            current_quality_value = INT_MIN;
+            break;
+        case beta_option:
+            current_quality_value = 0;
+            break;
         case quality_option:
-            app->requested_quality = ParseIntArgument<>{
+            current_quality_value = ParseIntArgument<>{
                     .name = "--quality",
                     .min = -1000,
                     .max = +1000,
@@ -882,6 +891,9 @@ int parse_cmdline(int argc, char** argv, SandstoneApplication* app, ParsedOpts& 
             return EX_USAGE;
         }
     }
+
+    // settled at this point
+    app->requested_quality = current_quality_value;
 
     if (SandstoneConfig::RestrictedCommandLine) {
         // Default options for the simplified OpenDCDiag cmdline

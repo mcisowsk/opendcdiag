@@ -63,6 +63,11 @@ constexpr const std::span<struct test> selftests = {};
 extern const std::span<struct test> selftests;
 #endif
 
+struct TestCandidate {
+    const char* name;
+    int current_quality_constraint;
+};
+
 class SandstoneTestSet
 {
 public:
@@ -96,6 +101,7 @@ public:
     int remove(const struct test *t);
 
     std::vector<struct test_cfg_info> add(const char *name);
+    std::vector<struct test_cfg_info> add(const TestCandidate& candidate);
     struct test_cfg_info add(test_cfg_info t);
 
     bool contains(struct test *test) const

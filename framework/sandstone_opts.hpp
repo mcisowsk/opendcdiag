@@ -17,7 +17,7 @@ struct ParsedOpts {
     const char* on_crash_arg = nullptr;
 
     // test selection
-    std::vector<const char *> enabled_tests;
+    std::vector<TestCandidate> enabled_tests; // test name and current quality level at the moment of parsing it
     std::vector<const char *> disabled_tests;
     const char *test_list_file_path = nullptr;
 

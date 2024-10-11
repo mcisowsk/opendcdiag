@@ -101,6 +101,18 @@ std::vector<struct test_cfg_info> SandstoneTestSet::add(const char *name) {
     return res;
 }
 
+std::vector<struct test_cfg_info> SandstoneTestSet::add(const TestCandidate& candidate) {
+    std::vector<struct test_cfg_info> res;
+    std::vector<struct test *> tests = lookup(candidate.name);
+    for (auto t : tests) {
+        if (t->quality_level >= candidate.current_quality_constraint) {
+            struct test_cfg_info ti = add(t);
+            res.push_back(ti);
+        }
+    }
+    return res;
+}
+
 /// Returns the number of tests that were removed from the test list, which may
 /// be zero.
 int SandstoneTestSet::remove(const struct test *test)
