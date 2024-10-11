@@ -767,7 +767,7 @@ static const fill_ucode_func ucode_impls[] = { fill_ucode_sysfs, fill_ucode_msr 
 /* prefer CPUID, fallback to sysfs. */
 static const fill_topo_func topo_impls[] = { fill_topo_cpuid, fill_topo_sysfs };
 
-void apply_cpuset_param(char *param)
+void apply_cpuset_param(SandstoneApplication* app, char *param)
 {
     struct MatchCpuInfoByCpuNumber {
         int cpu_number;
@@ -778,7 +778,7 @@ void apply_cpuset_param(char *param)
     if (SandstoneConfig::RestrictedCommandLine)
         return;
 
-    std::span<struct cpu_info> old_cpu_info(cpu_info, sApp->thread_count);
+    std::span<struct cpu_info> old_cpu_info(cpu_info, app->thread_count);
     std::vector<struct cpu_info> new_cpu_info;
     int total_matches = 0;
 
