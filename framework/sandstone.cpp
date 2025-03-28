@@ -115,6 +115,7 @@ enum {
     five_min_option,
 
     cpuset_option,
+    devices_option,
     disable_option,
     dump_cpu_info_option,
     fatal_skips_option,
@@ -3132,6 +3133,8 @@ skip_wait:
     return true;
 }
 
+extern int apply_devices_param(char *param);
+
 extern constexpr const uint64_t minimum_cpu_features = _compilerCpuFeatures;
 int main(int argc, char **argv)
 {
@@ -3146,6 +3149,7 @@ int main(int argc, char **argv)
         { "alpha", no_argument, &sApp->requested_quality, INT_MIN },
         { "beta", no_argument, &sApp->requested_quality, 0 },
         { "cpuset", required_argument, nullptr, cpuset_option },
+        { "devices", required_argument, nullptr, devices_option },
         { "disable", required_argument, nullptr, disable_option },
         { "dump-cpu-info", no_argument, nullptr, dump_cpu_info_option },
         { "enable", required_argument, nullptr, 'e' },
@@ -3373,6 +3377,17 @@ int main(int argc, char **argv)
         case cpuset_option:
             apply_cpuset_param(optarg);
             break;
+        case devices_option: {
+            // must be parsed AFTER cpuset!
+            // must be consistent with cpuset, if given!
+            // can return non-0 and must exit application!
+            // additional option for affinity on/off/auto (on/off conficting/mutually exclusive with cpuset?)
+            auto ret = apply_devices_param(optarg);
+            if (ret != EXIT_SUCCESS) {
+                return ret;
+            }
+            break;
+        }
         case dump_cpu_info_option:
             dump_cpu_info();
             return EXIT_SUCCESS;

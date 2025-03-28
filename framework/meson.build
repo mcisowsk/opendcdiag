@@ -123,7 +123,7 @@ endif
 
 if get_option('fuzzing') == true
     framework_files += files('fuzzing.c')
-    
+
     afl_dir = get_option('afl_inc')
     lookup_dirs = []
     if afl_dir != ''
