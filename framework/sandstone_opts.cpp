@@ -29,6 +29,7 @@ enum {
     five_min_option,
 
     cpuset_option,
+    devices_option,
     disable_option,
     dump_cpu_info_option,
     fatal_skips_option,
@@ -457,6 +458,7 @@ int parse_cmdline(int argc, char** argv, SandstoneApplication* app, ParsedCmdLin
         { "alpha", no_argument, &app->requested_quality, int(TEST_QUALITY_SKIP) },
         { "beta", no_argument, &app->requested_quality, int(TEST_QUALITY_BETA) },
         { "cpuset", required_argument, nullptr, cpuset_option },
+        { "devices", required_argument, nullptr, devices_option },
         { "disable", required_argument, nullptr, disable_option },
         { "dump-cpu-info", no_argument, nullptr, dump_cpu_info_option },
         { "enable", required_argument, nullptr, 'e' },
@@ -654,6 +656,9 @@ int parse_cmdline(int argc, char** argv, SandstoneApplication* app, ParsedCmdLin
                 break;
             case cpuset_option:
                 opts.cpuset = optarg;
+                break;
+            case devices_option:
+                opts.devices = optarg;
                 break;
             case dump_cpu_info_option:
                 opts.action = Action::dump_cpu_info;

@@ -274,6 +274,7 @@ sandstone_tests_link_whole += [ sandstone_tests ]
 
 executable(
     get_option('executable_name'),
+    'cpu_device.cpp',
     install : true,
     dependencies : target_deps,
     link_with : [

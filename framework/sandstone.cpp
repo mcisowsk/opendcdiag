@@ -2766,6 +2766,8 @@ skip_wait:
     return true;
 }
 
+extern int apply_devices_param(char *param);
+
 extern constexpr const uint64_t minimum_cpu_features = _compilerCpuFeatures;
 int main(int argc, char **argv)
 {
@@ -2806,6 +2808,17 @@ int main(int argc, char **argv)
 
     if (opts.cpuset) {
         apply_cpuset_param(opts.cpuset);
+    }
+    if (opts.devices) {
+        // must be parsed AFTER cpuset!
+        // must be consistent with cpuset, if given!
+        // can return non-0 and must exit application!
+        // additional option for affinity on/off/auto (on/off conficting/mutually exclusive with cpuset?)
+        // responsible for setting cpu_info.accel_id
+        auto ret = apply_devices_param(opts.devices);
+        if (ret != EXIT_SUCCESS) {
+            return ret;
+        }
     }
 
     switch (opts.action) {

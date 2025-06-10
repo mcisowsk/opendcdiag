@@ -390,6 +390,11 @@ struct cpu_info {
     uint8_t stepping;       ///! CPU stepping
     uint16_t model;         ///! CPU model
 
+// #ifdef <something>
+    /// Accelerator/GPU ID, -1 if not known/used.
+    int16_t accel_id;
+// #endif
+
 #ifdef __cplusplus
     int cpu() const;        ///! Internal CPU number
 #endif
