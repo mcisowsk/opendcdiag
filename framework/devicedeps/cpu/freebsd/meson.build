@@ -3,8 +3,7 @@
 
 framework_files += \
     files(
-        'malloc.cpp',
-        'pthread_barrier.cpp',
-        '../generic/kvm.c',
-        '../generic/memfpt.c',
+        'cpu_affinity.cpp',
+        '../generic' / 'msr.c',
+        '../generic' / 'physicaladdress.c',
     )

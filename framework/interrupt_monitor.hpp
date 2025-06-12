@@ -37,6 +37,7 @@ public:
     uint64_t count_thermal_events() const
     { return get_total_interrupt_counts(Thermal); }
 
+#ifdef SANDSTONE_DEVICE_CPU
     std::optional<uint64_t> count_smi_events(int cpu)
     {
         uint64_t msi_count = 0;
@@ -44,6 +45,7 @@ public:
             return msi_count;
         return std::nullopt;
     }
+#endif
 
     static constexpr bool InterruptMonitorWorks =
 #if defined(__linux__) && defined(__x86_64__)

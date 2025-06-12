@@ -226,6 +226,8 @@ default_cpp_warn = [
     '-Wno-non-virtual-dtor',
 ]
 
+fs = import('fs')
+
 # Subdirs can add target dependencies if they wish
 target_deps = []
 
@@ -279,7 +281,9 @@ sandstone_tests_link_whole = []
 unittests_sources = []
 
 subdir('framework')
-subdir('tests')
+if fs.is_dir('tests' / device_type)
+    subdir('tests' / device_type)
+endif
 
 sandstone_tests_link_whole += [sandstone_tests]
 
@@ -318,6 +322,7 @@ executable(
         '-march=haswell',
         debug_c_flags,
         default_cpp_warn,
+        device_flags,
         '-USANDSTONE',
     ],
     build_by_default: false,

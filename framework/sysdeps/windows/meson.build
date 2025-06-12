@@ -5,10 +5,8 @@ framework_files += \
     files(
         'aligned_alloc.cpp',
         'child_debug.cpp',
-        'cpu_affinity.cpp',
         'fcntl.c',
         'fnmatch.c',
-        'gettid.cpp',
         'mman.c',
         'resource.cpp',
         'signals.cpp',
@@ -17,9 +15,6 @@ framework_files += \
         'ucrt-mapping.c',
         'unistd.c',
         'win32_perror.c',
-        'win32_strerror.cpp',
         '../generic/kvm.c',
         '../generic/memfpt.c',
-        '../generic/msr.c',
-        '../generic/physicaladdress.c',
     )

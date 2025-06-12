@@ -54,8 +54,17 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "cpu_features.h"
 #include "forkfd.h"
+
+#include "devicedeps/devices.h"
+#ifdef SANDSTONE_DEVICE_CPU
+#   include "devicedeps/cpu/cpu_features.h"
+#   include "devicedeps/cpu/cpu_device.h"
+#   include "devicedeps/cpu/topology.h"
+#else
+#   include "devicedeps/gpu/gpu_device.h"
+#   include "devicedeps/gpu/topology.h"
+#endif
 
 #include "sandstone.h"
 #include "sandstone_p.h"
@@ -65,7 +74,6 @@
 #include "sandstone_thread.h"
 #include "sandstone_tests.h"
 #include "sandstone_utils.h"
-#include "topology.h"
 
 #if SANDSTONE_SSL_BUILD
 #  include "sandstone_ssl.h"
@@ -110,7 +118,6 @@ using namespace std::chrono_literals;
 char *program_invocation_name;
 #endif
 
-uint64_t cpu_features;
 static const struct test *current_test = nullptr;
 #ifdef __llvm__
 thread_local int thread_num __attribute__((tls_model("initial-exec")));
@@ -387,9 +394,11 @@ static bool shouldTestTheTest(const struct test *the_test)
 {
     if (!sApp->test_tests_enabled())
         return false;
+#ifdef SANDSTONE_DEVICE_CPU // TODO mce_test!!!
     if constexpr (InterruptMonitor::InterruptMonitorWorks)
         if (the_test == &mce_test)
             return false;
+#endif
 
     // check some flags in the_test
     return true;
@@ -401,8 +410,8 @@ inline void test_the_test_data<true>::test_tests_init(const struct test *the_tes
         return;
 
     hwm_at_start = memfpt_current_high_water_mark();
-    per_thread.resize(num_cpus());
-    std::fill_n(per_thread.begin(), num_cpus(), PerThread{});
+    per_thread.resize(num_devices());
+    std::fill_n(per_thread.begin(), num_devices(), PerThread{});
 }
 
 inline void test_the_test_data<true>::test_tests_iteration(const struct test *the_test)
@@ -441,14 +450,14 @@ inline void test_the_test_data<true>::test_tests_finish(const struct test *the_t
         log_warning("High water mark memory footprinting failed (%zu kB at start, %zu kB now)",
                     hwm_at_start, current_hwm);
     } else if (current_hwm) {
-        size_t per_thread_avg = (current_hwm - hwm_at_start) / num_cpus();
+        size_t per_thread_avg = (current_hwm - hwm_at_start) / num_devices();
         if (per_thread_avg < MaxAcceptableMemoryUseKB)
             log_info("Test memory use: (%zu - %zu) / %d = %zu kB",
-                     current_hwm, hwm_at_start, num_cpus(), per_thread_avg);
+                     current_hwm, hwm_at_start, num_devices(), per_thread_avg);
         else
             maybe_log_error(test_flag_ignore_memory_use,
                             "Test uses too much memory: (%zu - %zu) / %d = %zu kB",
-                            current_hwm, hwm_at_start, num_cpus(), per_thread_avg);
+                            current_hwm, hwm_at_start, num_devices(), per_thread_avg);
     }
 
     // check if the test has failed
@@ -491,7 +500,7 @@ inline void test_the_test_data<true>::test_tests_finish(const struct test *the_t
         Duration average = {};
         int average_counts = 0;
         int while_loops = 0;
-        for (int cpu = 0; cpu < num_cpus(); ++cpu) {
+        for (int cpu = 0; cpu < num_devices(); ++cpu) {
             PerThread &thr = per_thread[cpu];
             if (thr.iteration_times[0].time_since_epoch().count() == 0)
                 continue;
@@ -531,7 +540,7 @@ inline void test_the_test_data<true>::test_tests_finish(const struct test *the_t
                                 "run() function appears to use while (test_time_condition()) instead of do {} while");
 
             // find the threads where test_time_condition() wasn't called
-            for (int cpu = 0; average_counts != num_cpus() && cpu < num_cpus(); ++cpu) {
+            for (int cpu = 0; average_counts != num_devices() && cpu < num_devices(); ++cpu) {
                 PerThread &thr = per_thread[cpu];
                 if (thr.iteration_times[0].time_since_epoch().count() == 0)
                     log_message(cpu, SANDSTONE_LOG_WARNING "run() function did not call test_time_condition() in this thread");
@@ -680,54 +689,6 @@ bool test_is_retry() noexcept
     return sApp->current_iteration_count < 0;
 }
 
-// Creates a string containing all socket temperatures like: "P0:30oC P2:45oC"
-static string format_socket_temperature_string(const vector<int> & temps)
-{
-    string temp_string;
-    for(int i=0; i<temps.size(); ++i){
-        if (temps[i] != INVALID_TEMPERATURE){
-            char buffer[64];
-            sprintf(buffer, "P%d:%.1foC", i, temps[i]/1000.0);
-            temp_string += string(buffer) + " ";
-        }
-    }
-    return temp_string;
-}
-
-static void print_temperature_and_throttle()
-{
-    if (sApp->thermal_throttle_temp < 0)
-        return;     // throttle disabled
-
-    vector<int> temperatures = ThermalMonitor::get_all_socket_temperatures();
-
-    if (temperatures.empty()) return; // Cant find temperature files at all (probably on windows)
-
-    int highest_temp = *max_element(temperatures.begin(), temperatures.end());
-
-    while ((highest_temp > sApp->thermal_throttle_temp) && sApp->threshold_time_remaining > 0) {
-
-        if ((sApp->threshold_time_remaining % 1000) == 0) {
-            logging_printf(LOG_LEVEL_VERBOSE(1),
-                           "# CPU temperature (%.1foC) above threshold (%.1foC), throttling (%.1f s remaining)\n",
-                           highest_temp / 1000.0, sApp->thermal_throttle_temp / 1000.0,
-                           sApp->threshold_time_remaining / 1000.0);
-            logging_printf(LOG_LEVEL_VERBOSE(1),
-                    "# All CPU temperatures: %s\n", format_socket_temperature_string(temperatures).c_str());
-        }
-
-        const int throttle_ms = 100;
-        usleep(throttle_ms * 1000);
-        sApp->threshold_time_remaining -= throttle_ms;
-
-        temperatures = ThermalMonitor::get_all_socket_temperatures();
-        highest_temp = *max_element(temperatures.begin(), temperatures.end());
-    }
-
-    logging_printf(LOG_LEVEL_VERBOSE(1),
-                   "# CPU temperatures: %s\n", format_socket_temperature_string(temperatures).c_str());
-}
-
 static void apply_group_inits(/*nonconst*/ struct test *test)
 {
     // Create an array with the replacement functions per group and cache.
@@ -791,7 +752,9 @@ void prepare_test(/*nonconst*/ struct test *test)
 
 static void init_internal(const struct test *test)
 {
+#ifdef SANDSTONE_DEVICE_CPU // TODO maybe one day for GPU as well (maybe without throttle)?
     print_temperature_and_throttle();
+#endif
 
     logging_init(test);
 }
@@ -803,6 +766,7 @@ static void init_per_thread_data()
     for_each_test_thread(initer);
 }
 
+#ifdef SANDSTONE_DEVICE_CPU
 /* not static: used in tests/smi_count/smi_count.cpp */
 void initialize_smi_counts()
 {
@@ -814,21 +778,24 @@ void initialize_smi_counts()
     for (int i = 1; i < num_cpus(); i++)
         sApp->smi_counts_start[i] = sApp->count_smi_events(cpu_info[i].cpu_number).value_or(0);
 }
+#endif
 
 static void cleanup_internal(const struct test *test)
 {
     logging_finish();
 }
 
-static int cleanup_global(int exit_code, SandstoneApplication::PerCpuFailures per_cpu_failures)
+static int cleanup_global(int exit_code, SandstoneApplication::PerDeviceFailures per_dev_failures)
 {
+#ifdef SANDSTONE_DEVICE_CPU
     if (sApp->vary_frequency_mode)
         sApp->frequency_manager->restore_core_frequency_initial_state();
 
     if (sApp->vary_uncore_frequency_mode)
         sApp->frequency_manager->restore_uncore_frequency_initial_state();
+#endif
 
-    exit_code = print_application_footer(exit_code, std::move(per_cpu_failures));
+    exit_code = print_application_footer(exit_code, std::move(per_dev_failures));
     return logging_close_global(exit_code);
 }
 
@@ -915,11 +882,15 @@ void test_loop_end() noexcept
 
 static uintptr_t thread_runner(int thread_number)
 {
+#ifdef SANDSTONE_DEVICE_CPU
     // convert from internal Sandstone numbering to the system one
     pin_to_logical_processor(LogicalProcessor(cpu_info[thread_number].cpu_number), current_test->id);
+#endif
 
     PerThreadData::Test *this_thread = sApp->test_thread_data(thread_number);
+#ifdef SANDSTONE_DEVICE_CPU
     random_init_thread(thread_number);
+#endif
     int ret = EXIT_FAILURE;
 
     auto cleanup = scopeExit([&] {
@@ -940,16 +911,20 @@ static uintptr_t thread_runner(int thread_number)
         }
         test_end(new_state);
 
+#ifdef SANDSTONE_DEVICE_CPU
         // If rescheduling, do cleanup
         if (sApp->device_schedule != nullptr)
             sApp->device_schedule->finish_reschedule();
+#endif
     });
 
     // indicate to SIGQUIT handler that we're running
     this_thread->thread_state.store(thread_running, std::memory_order_relaxed);
 
+#ifdef SANDSTONE_DEVICE_CPU
     CPUTimeFreqStamp before;
     before.Snapshot(thread_number);
+#endif
     test_start();
 
     try {
@@ -961,9 +936,11 @@ static uintptr_t thread_runner(int thread_number)
 
     cleanup.run_now();
 
+#ifdef SANDSTONE_DEVICE_CPU
     CPUTimeFreqStamp after;
     after.Snapshot(thread_number);
     this_thread->effective_freq_mhz = CPUTimeFreqStamp::EffectiveFrequencyMHz(before, after);
+#endif
 
     if (sApp->shmem->verbosity >= 3)
         log_message(thread_number, SANDSTONE_LOG_INFO "inner loop count for thread %d = %" PRIu64 "\n",
@@ -973,33 +950,6 @@ static uintptr_t thread_runner(int thread_number)
     // our caller doesn't care what we return, but the returned value helps if
     // you're running strace
     return ret;
-}
-
-int num_cpus()
-{
-    return sApp->thread_count;
-}
-
-int num_packages() {
-    return Topology::topology().packages.size();
-}
-
-void reschedule()
-{
-    if (sApp->device_schedule == nullptr) return;
-    sApp->device_schedule->reschedule_to_next_device();
-    return;
-}
-
-static LogicalProcessorSet init_cpus()
-{
-    LogicalProcessorSet result = ambient_logical_processor_set();
-    sApp->thread_count = result.count();
-    sApp->user_thread_data.resize(sApp->thread_count);
-#ifdef M_ARENA_MAX
-    mallopt(M_ARENA_MAX, sApp->thread_count * 2);
-#endif
-    return result;
 }
 
 static void attach_shmem_internal(int fd, size_t size)
@@ -1031,15 +981,15 @@ static void init_shmem()
             "PerThreadData::Test size grew, please check if it was intended");
     assert(sApp->current_fork_mode() != SandstoneApplication::child_exec_each_test);
     assert(sApp->shmem == nullptr);
-    assert(num_cpus());
+    assert(num_devices());
 
     unsigned per_thread_size = sizeof(PerThreadData::Main);
     per_thread_size = ROUND_UP_TO(per_thread_size, alignof(PerThreadData::Test));
-    per_thread_size += sizeof(PerThreadData::Test) * num_cpus();
+    per_thread_size += sizeof(PerThreadData::Test) * num_devices();
     per_thread_size = ROUND_UP_TO_PAGE(per_thread_size);
 
     unsigned thread_data_offset = sizeof(SandstoneApplication::SharedMemory) +
-            sizeof(Topology::Thread) * num_cpus();
+             sizeof(DeviceTopologyThread) * num_devices();
     thread_data_offset = ROUND_UP_TO_PAGE(thread_data_offset);
 
     size_t size = thread_data_offset;
@@ -1066,10 +1016,10 @@ static void init_shmem()
 static void commit_shmem()
 {
     // the most detailed plan is the last
-    const std::vector<CpuRange> &plan = sApp->slice_plans.plans.end()[-1];
+    const std::vector<DeviceRange> &plan = sApp->slice_plans.plans.end()[-1];
     size_t main_thread_count = plan.size();
     sApp->shmem->main_thread_count = main_thread_count;
-    sApp->shmem->total_cpu_count = num_cpus();
+    sApp->shmem->total_cpu_count = num_devices();
 
     // unmap the current area, because Windows doesn't allow us to have two
     // blocks for this file
@@ -1079,7 +1029,7 @@ static void commit_shmem()
     // enlarge the file and map the extra data
     size_t size = sizeof(PerThreadData::Main) * main_thread_count;
     size = ROUND_UP_TO_PAGE(size);
-    size += sizeof(PerThreadData::Test) * num_cpus();
+    size += sizeof(PerThreadData::Test) * num_devices();
     size = ROUND_UP_TO_PAGE(size);
 
     if (ftruncate(sApp->shmemfd, offset + size) < 0) {
@@ -1094,7 +1044,7 @@ static void commit_shmem()
     }
 
     // sApp->shmem has probably moved
-    restrict_topology({ 0, num_cpus() });
+    restrict_topology({ 0, num_devices() });
 }
 
 static void attach_shmem(int fd)
@@ -1126,178 +1076,17 @@ static void protect_shmem()
     IGNORE_RETVAL(mprotect(sApp->shmem, protected_len, PROT_READ));
 }
 
-static void slice_plan_init(int max_cores_per_slice)
-{
-    auto set_to_full_system = []() {
-        // only one plan and that's the full system
-        std::vector plan = { CpuRange{ 0, num_cpus() } };
-        sApp->slice_plans.plans.fill(plan);
-        return;
-    };
-    for (std::vector<CpuRange> &plan : sApp->slice_plans.plans)
-        plan.clear();
-
-    if (sApp->current_fork_mode() == SandstoneApplication::no_fork || max_cores_per_slice < 0)
-        return set_to_full_system();
-
-    // The heuristic is enabled by max_cores_per_slice == 0 and a valid
-    // topology:
-    // - if the CPU Set has less than or equal to MinimumCpusPerSocket (8)
-    //   logical processors per socket (on average), we ignore the topology and
-    //   will instead run in slices of up to DefaultMaxCoresPerSlice (32)
-    //   logical processors.
-    // - otherwise, we'll have at least one slice per socket
-    //   * if the socket has more than 32 cores, we'll attempt to slice it
-    //     at NUMA node boundaries
-    //   * if a NUMA node has more than 32 cores, we'll attempt to split it
-    //     evenly so each slice has 32 cores (64 threads on a system with 2
-    //     threads per core)
-    // - we always keep the cores of a given module and threads of a core
-    //   in the same slice
-    //   * this means on some situations the slices may have more than 32 cores
-    //     (i.e. the 32nd and 33rd core were part of the same module)
-    //
-    // If the user specifies a --max-cores-per-slice option in the
-    // command-line, it will bypass the heuristic but keep the slice balancing
-    // as described above. Be aware bypasses the minimum average processor per
-    // socket check.
-
-    int max_cpu = num_cpus();
-    const Topology &topology = Topology::topology();
-    while (topology.isValid()) {     // not a loop, just so we can use break
-        using SlicePlans = SandstoneApplication::SlicePlans;
-        static constexpr int MinimumCpusPerSocket = SlicePlans::MinimumCpusPerSocket;
-        static constexpr int DefaultMaxCoresPerSlice = SlicePlans::DefaultMaxCoresPerSlice;
-
-        if (max_cores_per_slice == 0) {
-            // apply defaults
-            int average_cpus_per_socket = max_cpu / topology.packages.size();
-            max_cores_per_slice = DefaultMaxCoresPerSlice;
-            if (average_cpus_per_socket <= MinimumCpusPerSocket)
-                break;
-        }
-
-        // set up proper plans
-        std::vector<CpuRange> &isolate_socket = sApp->slice_plans.plans[SlicePlans::IsolateSockets];
-        std::vector<CpuRange> &split = sApp->slice_plans.plans[SlicePlans::Heuristic];
-        auto push_to = [](std::vector<CpuRange> &to, auto start, auto end) {
-            int start_cpu = start[0].threads.front().cpu();
-            int end_cpu = end[-1].threads.back().cpu();
-            assert(end_cpu >= start_cpu);
-            to.push_back(CpuRange{ start_cpu, end_cpu + 1 - start_cpu });
-        };
-
-        for (const Topology::Package &p : topology.packages) {
-            if (p.cores.size() == 0)
-                continue;       // untested socket
-
-            push_to(isolate_socket, p.cores.begin(), p.cores.end());
-            if (p.cores.size() <= max_cores_per_slice) {
-                // easy case: package has fewer than max_cores_per_slice
-                split = isolate_socket;
-                continue;
-            }
-
-            // if we have to split, we'll try to split along NUMA node lines
-            for (const Topology::NumaNode &n : p.numa_domains) {
-                if (n.cores.size() == 0)
-                    continue;   // untested node (shouldn't happen!)
-
-                auto begin = n.cores.begin();
-                const auto end = n.cores.end();
-                ptrdiff_t slice_count = n.cores.size() / max_cores_per_slice;
-                if (n.cores.size() % max_cores_per_slice)
-                    ++slice_count;  // round up (also makes at least 1)
-                ptrdiff_t slice_size = n.cores.size() / slice_count;
-
-                // populate slices of roughly slice_size cores, but keep
-                // modules within the same slice
-                while (end - begin > slice_size) {
-                    auto e = begin + slice_size;
-                    while (e != end && e[-1].threads[0].module_id == e[0].threads[0].module_id)
-                        ++e;
-                    push_to(split, begin, e);
-                    begin = e;
-                }
-                if (begin != end)
-                    push_to(split, begin, end);
-            }
-        }
-        return;
-    }
-
-    if (max_cores_per_slice == 0) {
-        set_to_full_system();
-    } else {
-        // dumb plan, not *cores*
-        int slice_count = (max_cpu - 1) / max_cores_per_slice + 1;
-        std::vector<CpuRange> plan;
-        plan.reserve(slice_count);
-
-        int slice_size = max_cpu / slice_count;
-        int cpu = 0;
-        for ( ; cpu < max_cpu - slice_size; cpu += slice_size)
-            plan.push_back(CpuRange{ cpu, slice_size });
-        plan.push_back(CpuRange{ cpu, max_cpu - cpu });
-        sApp->slice_plans.plans.fill(plan);
-    }
-}
-
 __attribute__((weak, noclone, noinline)) void print_application_banner()
 {
 }
 
-__attribute__((weak, noclone, noinline)) void cpu_specific_init()
+__attribute__((weak, noclone, noinline)) void device_specific_init()
 {
 }
 
-__attribute__((weak, noclone, noinline)) int print_application_footer(int exit_code, SandstoneApplication::PerCpuFailures per_cpu_failures)
+__attribute__((weak, noclone, noinline)) int print_application_footer(int exit_code, SandstoneApplication::PerDeviceFailures per_dev_failures)
 {
     return exit_code;
-}
-
-static std::string cpu_features_to_string(uint64_t f)
-{
-    std::string result;
-    const char *comma = "";
-    for (size_t i = 0; i < std::size(x86_locators); ++i) {
-        if (f & (UINT64_C(1) << i)) {
-            result += comma;
-            result += features_string + features_indices[i] + 1;
-            comma = ",";
-        }
-    }
-    return result;
-}
-
-static void dump_cpu_info()
-{
-    int i;
-
-    // find the best matching CPU
-    const char *detected = "<unknown>";
-    for (const auto &arch : x86_architectures) {
-        if ((arch.features & cpu_features) == arch.features) {
-            detected = arch.name;
-            break;
-        }
-        if (sApp->shmem->verbosity > 1)
-            printf("CPU is not %s: missing %s\n", arch.name,
-                   cpu_features_to_string(arch.features & ~cpu_features).c_str());
-    }
-    printf("Detected CPU: %s; family-model-stepping (hex): %02x-%02x-%02x; CPU features: %s\n",
-           detected, cpu_info[0].family, cpu_info[0].model, cpu_info[0].stepping,
-           cpu_features_to_string(cpu_features).c_str());
-    printf("# CPU\tPkgID\tCoreID\tThrdID\tModId\tNUMAId\tApicId\tMicrocode\tPPIN\n");
-    for (i = 0; i < num_cpus(); ++i) {
-        printf("%d\t%d\t%d\t%d\t%d\t%d\t%d\t0x%" PRIx64, cpu_info[i].cpu_number,
-               cpu_info[i].package_id, cpu_info[i].core_id, cpu_info[i].thread_id,
-               cpu_info[i].module_id, cpu_info[i].numa_id, cpu_info[i].hwid,
-               cpu_info[i].microcode);
-        if (cpu_info[i].ppin)
-            printf("\t%016" PRIx64, cpu_info[i].ppin);
-        puts("");
-    }
 }
 
 // Called every time we restart the tests
@@ -1307,14 +1096,14 @@ static void restart_init(int iterations)
 
 static void run_threads_in_parallel(const struct test *test)
 {
-    SandstoneTestThread thr[num_cpus()];    // NOLINT: -Wvla
+    SandstoneTestThread thr[num_devices()];    // NOLINT: -Wvla
     int i;
 
-    for (i = 0; i < num_cpus(); i++) {
+    for (i = 0; i < num_devices(); i++) {
         thr[i].start(thread_runner, i);
     }
     /* wait for threads to end */
-    for (i = 0; i < num_cpus(); i++) {
+    for (i = 0; i < num_devices(); i++) {
         thr[i].join();
     }
 }
@@ -1325,7 +1114,7 @@ static void run_threads_sequentially(const struct test *test)
     // (which uses pthread_cancel())
     SandstoneTestThread thread;
     thread.start([](int cpu) {
-        for ( ; cpu != num_cpus(); thread_num = ++cpu)
+        for ( ; cpu != num_devices(); thread_num = ++cpu)
             thread_runner(cpu);
         return uintptr_t(cpu);
     }, 0);
@@ -1630,7 +1419,9 @@ static TestResult child_run(/*nonconst*/ struct test *test, int child_number)
     if (sApp->current_fork_mode() != SandstoneApplication::no_fork) {
         protect_shmem();
         sApp->select_main_thread(child_number);
+#ifdef SANDSTONE_DEVICE_CPU
         pin_to_logical_processors(sApp->main_thread_data()->cpu_range, "control");
+#endif
         restrict_topology(sApp->main_thread_data()->cpu_range);
         signals_init_child();
         debug_init_child();
@@ -1652,7 +1443,9 @@ static TestResult child_run(/*nonconst*/ struct test *test, int child_number)
             // processor but its pinning doesn't affect this control thread
             auto init_thread_runner = [](void *testptr) {
                 auto test = static_cast</*nonconst*/ struct test *>(testptr);
+#ifdef SANDSTONE_DEVICE_CPU
                 pin_to_logical_processor(LogicalProcessor(cpu_info[0].cpu_number));
+#endif
                 thread_num = -1;
                 intptr_t ret = test->test_init(test);
                 return reinterpret_cast<void *>(ret);
@@ -1901,11 +1694,11 @@ static int slices_for_test(const struct test *test)
         return SandstoneApplication::SlicePlans::Heuristic;
     }();
     if (type == SandstoneApplication::SlicePlans::FullSystem) {
-        sApp->main_thread_data()->cpu_range = { 0, num_cpus() };
+        sApp->main_thread_data()->cpu_range = { 0, num_devices() };
         return 1;
     }
 
-    const std::vector<CpuRange> &plan = sApp->slice_plans.plans[type];
+    const std::vector<DeviceRange> &plan = sApp->slice_plans.plans[type];
     for (size_t i = 0; i < plan.size(); ++i)
         sApp->main_thread_data(i)->cpu_range = plan[i];
 
@@ -1952,6 +1745,7 @@ static TestResult run_one_test_once(const struct test *test)
     ChildrenList children;
 
     sApp->current_test_count++;
+#ifdef SANDSTONE_DEVICE_CPU
     if (uint64_t missing = (test->minimum_cpu | test->compiler_minimum_cpu) & ~cpu_features) {
         init_per_thread_data();
 
@@ -1961,7 +1755,9 @@ static TestResult run_one_test_once(const struct test *test)
         (void) missing;
 
         children.results.emplace_back(ChildExitStatus{ TestResult::Skipped });
-    } else if (test->quality_level == TEST_QUALITY_BETA && test->quality_level < sApp->requested_quality) {
+    } else
+#endif
+    if (test->quality_level == TEST_QUALITY_BETA && test->quality_level < sApp->requested_quality) {
         init_per_thread_data();
         log_skip(TestResourceIssueSkipCategory, "Test %s is in BETA quality, try again using --beta option", test->id);
         children.results.emplace_back(ChildExitStatus{ TestResult::Skipped });
@@ -2000,7 +1796,7 @@ static TestResult run_one_test_once(const struct test *test)
 }
 
 static void analyze_test_failures(const struct test *test, int fail_count, int attempt_count,
-                                  const SandstoneApplication::PerCpuFailures &per_cpu_failures)
+                                  const SandstoneApplication::PerDeviceFailures &per_dev_failures)
 {
     logging_printf(LOG_LEVEL_VERBOSE(1), "# Test failed %d out of %d times"
                                          " (%.1f%%)\n", fail_count, attempt_count,
@@ -2011,20 +1807,21 @@ static void analyze_test_failures(const struct test *test, int fail_count, int a
     bool all_cpus_failed_equally = true;
     uint64_t fail_pattern = 0;
     int nfailures = 0;
-    for (size_t i = 0; i < num_cpus() && all_cpus_failed_equally; ++i) {
-        if (per_cpu_failures[i]) {
+    for (size_t i = 0; i < num_devices() && all_cpus_failed_equally; ++i) {
+        if (per_dev_failures[i]) {
             if (++nfailures == 1)
-                fail_pattern = per_cpu_failures[i];
-            else if (per_cpu_failures[i] != fail_pattern)
+                fail_pattern = per_dev_failures[i];
+            else if (per_dev_failures[i] != fail_pattern)
                 all_cpus_failed_equally = false;
         }
     }
-    if (all_cpus_failed_equally && nfailures == num_cpus()) {
+    if (all_cpus_failed_equally && nfailures == num_devices()) {
         logging_printf(LOG_LEVEL_VERBOSE(1), "# All CPUs failed equally. This is highly unlikely (SW bug?)\n");
         return;
     }
 
-    Topology topology  = Topology::topology();
+#ifdef SANDSTONE_DEVICE_CPU
+    CpuTopology topology  = CpuTopology::topology();
     if (!topology.isValid()) {
         // can't use this information
         if (all_cpus_failed_equally)
@@ -2045,11 +1842,11 @@ static void analyze_test_failures(const struct test *test, int fail_count, int a
         int failed_packages = 0;
         int last_bad_package = -1;
         for (size_t p = 0; p < topology.packages.size(); ++p) {
-            Topology::Package *pkg = &topology.packages[p];
+            CpuTopology::Package *pkg = &topology.packages[p];
             for (size_t c = 0; c < pkg->cores.size(); ++c) {
-                Topology::Core *core = &pkg->cores[c];
-                for (const Topology::Thread &thr : core->threads) {
-                    if (per_cpu_failures[thr.cpu()] && (pkg_failures[p] == -1)) {
+                CpuTopology::Core *core = &pkg->cores[c];
+                for (const CpuTopology::Thread &thr : core->threads) {
+                    if (per_dev_failures[thr.cpu()] && (pkg_failures[p] == -1)) {
                         last_bad_package = pkg->id();
                         failed_packages++;
                         pkg_failures[p] = pkg->id();
@@ -2070,15 +1867,15 @@ static void analyze_test_failures(const struct test *test, int fail_count, int a
         // valid topology, we can do more a interesting analysis
         logging_printf(LOG_LEVEL_VERBOSE(1), "# Topology analysis:\n");
         for (size_t p = 0; p < topology.packages.size(); ++p) {
-            Topology::Package *pkg = &topology.packages[p];
+            CpuTopology::Package *pkg = &topology.packages[p];
             for (size_t c = 0; c < pkg->cores.size(); ++c) {
-                Topology::Core *core = &pkg->cores[c];
+                CpuTopology::Core *core = &pkg->cores[c];
                 bool all_threads_failed_once = true;
                 bool all_threads_failed_equally = true;
                 int nthreads = 0;
                 fail_pattern = 0;
-                for (const Topology::Thread &thr : core->threads) {
-                    auto this_pattern = per_cpu_failures[thr.cpu()];
+                for (const CpuTopology::Thread &thr : core->threads) {
+                    auto this_pattern = per_dev_failures[thr.cpu()];
                     if (this_pattern == 0)
                         all_threads_failed_once = false;
                     if (++nthreads == 1) {
@@ -2110,10 +1907,11 @@ static void analyze_test_failures(const struct test *test, int fail_count, int a
             }
         }
     }
+#endif
 }
 
 static TestResult
-run_one_test(const test_cfg_info &test_cfg, SandstoneApplication::PerCpuFailures &per_cpu_fails)
+run_one_test(const test_cfg_info &test_cfg, SandstoneApplication::PerDeviceFailures &per_dev_fails)
 {
     const struct test *test = test_cfg.test;
     TestResult state = TestResult::Skipped;
@@ -2124,20 +1922,20 @@ run_one_test(const test_cfg_info &test_cfg, SandstoneApplication::PerCpuFailures
     Duration runtime = 0ms;
 
     // resize and zero the storage
-    if (per_cpu_fails.size() == num_cpus()) {
-        std::fill_n(per_cpu_fails.begin(), num_cpus(), 0);
+    if (per_dev_fails.size() == num_devices()) {
+        std::fill_n(per_dev_fails.begin(), num_devices(), 0);
     } else {
-        per_cpu_fails.clear();
-        per_cpu_fails.resize(num_cpus(), 0);
+        per_dev_fails.clear();
+        per_dev_fails.resize(num_devices(), 0);
     }
-    auto mark_up_per_cpu_fail = [&per_cpu_fails, &fail_count](int i) {
+    auto mark_up_per_cpu_fail = [&per_dev_fails, &fail_count](int i) {
         ++fail_count;
         if (i >= SandstoneApplication::MaxRetestCount)
             return;
         for_each_test_thread([&](PerThreadData::Test *data, int i) {
-            using U = SandstoneApplication::PerCpuFailures::value_type;
+            using U = SandstoneApplication::PerDeviceFailures::value_type;
             if (data->has_failed())
-                per_cpu_fails[i] |= U(1) << i;
+                per_dev_fails[i] |= U(1) << i;
         });
     };
 
@@ -2175,6 +1973,7 @@ run_one_test(const test_cfg_info &test_cfg, SandstoneApplication::PerCpuFailures
     /* First we go to do our -- possibly fractured -- normal run, we'll do retries after */
     for (sApp->current_iteration_count = 0;; ++sApp->current_iteration_count) {
 
+#ifdef SANDSTONE_DEVICE_CPU
         //change frequency per fracture
         if (sApp->vary_frequency_mode == true)
             sApp->frequency_manager->change_core_frequency();
@@ -2182,6 +1981,7 @@ run_one_test(const test_cfg_info &test_cfg, SandstoneApplication::PerCpuFailures
         //change uncore frequency per fracture
         if (sApp->vary_uncore_frequency_mode == true)
             sApp->frequency_manager->change_uncore_frequency();
+#endif
 
         init_internal(test);
 
@@ -2250,14 +2050,17 @@ run_one_test(const test_cfg_info &test_cfg, SandstoneApplication::PerCpuFailures
                 mark_up_per_cpu_fail(iterations);
         }
 
-        analyze_test_failures(test, fail_count, iterations, per_cpu_fails);
+        analyze_test_failures(test, fail_count, iterations, per_dev_fails);
         state = TestResult::Failed;
     }
 
 out:
+
+#ifdef SANDSTONE_DEVICE_CPU
     //reset frequency level idx for the next test
     if (sApp->vary_frequency_mode || sApp->vary_uncore_frequency_mode)
         sApp->frequency_manager->reset_frequency_level_idx();
+#endif
 
     random_advance_seed();      // advance seed for the next test
     logging_flush();
@@ -2294,10 +2097,12 @@ static void list_tests(const ParsedCmdLineOpts& opts)
                 if (opts.list_tests_include_descriptions) {
                     printf("%i %-20s \"%s\"\n", ++i, test->id, test->description);
                 } else if (sApp->shmem->verbosity > 0) {
+#ifdef SANDSTONE_DEVICE_CPU
                     // don't report the FW minimum CPU features
                     uint64_t cpuf = test->compiler_minimum_cpu & ~_compilerCpuFeatures;
                     cpuf |= test->minimum_cpu;
                     printf("%-20s %s\n", test->id, cpu_features_to_string(cpuf).c_str());
+#endif
                 } else {
                     puts(test->id);
                 }
@@ -2429,7 +2234,9 @@ static int exec_mode_run(int argc, char **argv)
     int child_number = parse_int(argv[3]);
 
     attach_shmem(parse_int(argv[2]));
+#ifdef SANDSTONE_DEVICE_CPU // TODO with this global variable it's ugly
     cpu_info = sApp->shmem->cpu_info;
+#endif
     sApp->thread_count = sApp->shmem->total_cpu_count;
     sApp->user_thread_data.resize(sApp->thread_count);
 
@@ -2766,7 +2573,6 @@ skip_wait:
     return true;
 }
 
-extern constexpr const uint64_t minimum_cpu_features = _compilerCpuFeatures;
 int main(int argc, char **argv)
 {
     // initialize the main application
@@ -2792,11 +2598,9 @@ int main(int argc, char **argv)
         return exec_mode_run(argc - 2, argv + 2);
     }
 
-    {
-        LogicalProcessorSet enabled_cpus = init_cpus();
-        init_shmem();
-        init_topology(std::move(enabled_cpus));
-    }
+    init_num_devices();
+    init_shmem(); // this uses num_devices
+    init_topology(); // this uses shmem
 
     ParsedCmdLineOpts opts;
     auto ret = parse_cmdline(argc, argv, sApp, opts);
@@ -2805,12 +2609,12 @@ int main(int argc, char **argv)
     }
 
     if (opts.cpuset) {
-        apply_cpuset_param(opts.cpuset);
+        apply_deviceset_param(opts.cpuset);
     }
 
     switch (opts.action) {
     case Action::dump_cpu_info:
-        dump_cpu_info();
+        dump_device_info();
         return EXIT_SUCCESS;
     case Action::list_tests:
         test_set = new SandstoneTestSet(opts.test_set_config, SandstoneTestSet::enable_all_tests);
@@ -2834,11 +2638,13 @@ int main(int argc, char **argv)
                     program_invocation_name);
             return EX_USAGE;
         }
+#ifdef SANDSTONE_DEVICE_CPU
         if (sApp->device_schedule) {
             fprintf(stderr, "%s: error: --reschedule is not supported in this configuration\n",
                     program_invocation_name);
             return EX_USAGE;
         }
+#endif
     }
 
     if (sApp->total_retest_count < -1 || sApp->retest_count == 0)
@@ -2846,7 +2652,9 @@ int main(int argc, char **argv)
 
     if (unsigned(opts.thread_count()) < unsigned(sApp->thread_count))
         restrict_topology({ 0, opts.thread_count() });
+#ifdef SANDSTONE_DEVICE_CPU
     slice_plan_init(opts.max_cores_per_slice());
+#endif
     commit_shmem();
 
     signals_init_global();
@@ -2856,7 +2664,7 @@ int main(int argc, char **argv)
 
     print_application_banner();
     logging_init_global();
-    cpu_specific_init();
+    device_specific_init();
     random_init_global(opts.seed);
     background_scan_init();
 
@@ -2906,8 +2714,10 @@ int main(int argc, char **argv)
 
     /* Add mce_check as the last test to the set. It will be kept last by
      * SandstoneTestSet in case randomization is requested. */
-    if (!sApp->ignore_mce_errors)
+#ifdef SANDSTONE_DEVICE_CPU // TODO!!
+     if (!sApp->ignore_mce_errors)
         test_set->add(&mce_test);
+#endif
 
     /* Remove all the tests we were told to disable */
     if (opts.disabled_tests.size()) {
@@ -2919,6 +2729,7 @@ int main(int argc, char **argv)
     if (sApp->shmem->verbosity == -1)
         sApp->shmem->verbosity = (sApp->requested_quality < SandstoneApplication::DefaultQualityLevel) ? 1 : 0;
 
+#ifdef SANDSTONE_DEVICE_CPU // TODO mce_test\!!!!!!!!!
     if (InterruptMonitor::InterruptMonitorWorks && test_set->contains(&mce_test)) {
         sApp->last_thermal_event_count = sApp->count_thermal_events();
         sApp->mce_counts_start = sApp->get_mce_interrupt_counts();
@@ -2932,7 +2743,9 @@ int main(int argc, char **argv)
 
         sApp->mce_count_last = std::accumulate(sApp->mce_counts_start.begin(), sApp->mce_counts_start.end(), uint64_t(0));
     }
+#endif
 
+#ifdef SANDSTONE_DEVICE_CPU
     if (sApp->vary_frequency_mode || sApp->vary_uncore_frequency_mode)
         sApp->frequency_manager = std::make_unique<FrequencyManager>();
 
@@ -2943,6 +2756,7 @@ int main(int argc, char **argv)
     //if --vary-uncore-frequency mode is used, do a initial setup for running different frequencies
     if (sApp->vary_uncore_frequency_mode)
         sApp->frequency_manager->initial_uncore_frequency_setup();
+#endif
 
 #ifndef __OPTIMIZE__
     logging_printf(LOG_LEVEL_VERBOSE(1), "THIS IS AN UNOPTIMIZED BUILD: DON'T TRUST TEST TIMING!\n");
@@ -2957,13 +2771,15 @@ int main(int argc, char **argv)
 
     logging_print_header(argc, argv, test_duration(), test_timeout(test_duration()));
 
-    SandstoneApplication::PerCpuFailures per_cpu_failures;
+    SandstoneApplication::PerDeviceFailures per_dev_failures;
 
     sApp->current_test_count = 0;
     int total_tests_run = 0;
     TestResult lastTestResult = TestResult::Skipped;
 
+#ifdef SANDSTONE_DEVICE_CPU
     initialize_smi_counts();  // used by smi_count test
+#endif
 
     for (auto it = get_first_test(); it != test_set->end(); it = get_next_test(it)) {
         if (lastTestResult != TestResult::Skipped) {
@@ -2980,7 +2796,7 @@ int main(int argc, char **argv)
             }
         }
 
-        lastTestResult = run_one_test(*it, per_cpu_failures);
+        lastTestResult = run_one_test(*it, per_dev_failures);
 
         total_tests_run++;
         if (lastTestResult == TestResult::Failed) {
@@ -3010,5 +2826,5 @@ int main(int argc, char **argv)
         exit_code = EXIT_FAILURE;
 
     // done running all the tests, clean up and exit
-    return cleanup_global(exit_code, std::move(per_cpu_failures));
+    return cleanup_global(exit_code, std::move(per_dev_failures));
 }

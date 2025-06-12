@@ -6,7 +6,8 @@
 #ifndef INC_TOPOLOGY_H
 #define INC_TOPOLOGY_H
 
-#include <sandstone.h>
+#include "sandstone.h"
+#include "devicedeps/devices.h"
 
 #include <array>
 #include <bit>
@@ -14,6 +15,8 @@
 #include <span>
 #include <string>
 #include <vector>
+#include <functional>
+#include <barrier>
 
 #include <limits.h>
 #include <stddef.h>
@@ -23,7 +26,7 @@
 
 class LogicalProcessorSet;
 
-class Topology
+class CpuTopology
 {
 public:
     using Thread = struct cpu_info;
@@ -52,7 +55,7 @@ public:
 
     std::vector<Package> packages;
 
-    Topology(std::vector<Package> pkgs)
+    CpuTopology(std::vector<Package> pkgs)
     {
         packages = std::move(pkgs);
     }
@@ -60,11 +63,14 @@ public:
     bool isValid() const        { return !packages.empty(); }
     std::string build_falure_mask(const struct test *test) const;
 
-    static const Topology &topology();
+    static const CpuTopology &topology();
     struct Data;
     Data clone() const;
 };
-struct Topology::Data
+
+using DeviceTopologyThread = CpuTopology::Thread;
+
+struct CpuTopology::Data
 {
     // this type is move-only (not copyable)
     Data() = default;
@@ -74,17 +80,10 @@ struct Topology::Data
     Data &operator=(Data &&) = default;
 
     std::vector<Package> packages;
-    std::vector<Topology::Thread> all_threads;
+    std::vector<CpuTopology::Thread> all_threads;
 };
 
 enum class LogicalProcessor : int {};
-
-struct CpuRange
-{
-    // a contiguous range
-    int starting_cpu;
-    int cpu_count;
-};
 
 struct LogicalProcessorSetOps
 {
@@ -201,10 +200,72 @@ private:
 LogicalProcessorSet ambient_logical_processor_set();
 bool pin_to_logical_processor(LogicalProcessor, const char *thread_name = nullptr);
 bool pin_thread_to_logical_processor(LogicalProcessor n, tid_t thread_id, const char *thread_name = nullptr);
-bool pin_to_logical_processors(CpuRange, const char *thread_name);
+bool pin_to_logical_processors(DeviceRange, const char *thread_name);
 
-void apply_cpuset_param(char *param);
-void init_topology(const LogicalProcessorSet &enabled_cpus);
-void restrict_topology(CpuRange range);
+void slice_plan_init(int max_cores_per_slice);
+void reschedule();
+
+// TODO move to devices.h once implemented in gpu as well
+void print_temperature_and_throttle();
+
+class DeviceSchedule {
+public:
+    virtual void reschedule_to_next_device() = 0;
+    virtual void finish_reschedule() = 0;
+    virtual ~DeviceSchedule() = default;
+protected:
+    void pin_to_next_cpu(int next_cpu, tid_t thread_id = 0);
+};
+
+class BarrierDeviceSchedule : public DeviceSchedule
+{
+public:
+    void reschedule_to_next_device() override;
+    void finish_reschedule() override;
+
+private:
+    struct GroupInfo {
+        std::barrier<std::function<void()>> *barrier;
+        std::vector<pid_t> tid;     // Keep track of all members tid
+        std::vector<int> next_cpu;  // Keep track of cpus on the group
+
+        GroupInfo(int members_per_group, std::function<void()> on_completion)
+        {
+            barrier = new std::barrier<std::function<void()>>(members_per_group, std::move(on_completion));
+            tid.resize(members_per_group);
+            next_cpu.resize(members_per_group);
+        }
+
+        ~GroupInfo()
+        {
+            delete barrier;
+        }
+    };
+
+    const int members_per_group = 2; // TODO: Make it configurable
+    std::vector<GroupInfo> groups;
+    std::mutex groups_mutex;
+};
+
+class QueueDeviceSchedule : public DeviceSchedule
+{
+public:
+    void reschedule_to_next_device() override;
+    void finish_reschedule() override {}
+
+private:
+    void shuffle_queue();
+
+    int q_idx = 0;
+    std::vector<int> queue;
+    std::mutex q_mutex;
+};
+
+class RandomDeviceSchedule : public DeviceSchedule
+{
+public:
+    void reschedule_to_next_device() override;
+    void finish_reschedule() override {}
+};
 
 #endif /* INC_TOPOLOGY_H */

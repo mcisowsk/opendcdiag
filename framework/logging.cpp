@@ -15,7 +15,9 @@
 #  include "sandstone_ssl.h"
 #endif
 #include "test_knobs.h"
-#include "topology.h"
+#ifdef SANDSTONE_DEVICE_CPU // TODO code is compiled unconditionally and uses CpuTopology!
+#include "devicedeps/cpu/topology.h"
+#endif
 
 #include <array>
 #include <charconv>
@@ -253,6 +255,7 @@ static int level_from_code(uint8_t code)
     return code & 0xf;
 }
 
+#ifdef SANDSTONE_DEVICE_CPU
 static auto thread_core_spacing()
 {
     // calculate the spacing so things align
@@ -282,6 +285,7 @@ static auto thread_core_spacing()
     }();
     return spacing;
 }
+#endif
 
 enum class Iso8601Format : unsigned {
     WithoutMs           = 0,
@@ -1776,15 +1780,19 @@ void KeyValuePairLogger::print(int tc)
     logging_printf(LOG_LEVEL_VERBOSE(1), "%s_quality = %s\n", test->id, quality_string(test));
     logging_printf(LOG_LEVEL_VERBOSE(1), "%s_description = %s\n", test->id, test->description);
     logging_printf(LOG_LEVEL_VERBOSE(1), "%s_pass_count = %d\n", test->id, pc);
+#ifdef SANDSTONE_DEVICE_CPU
     logging_printf(LOG_LEVEL_VERBOSE(2), "%s_virtualized = %s\n", test->id,
                    cpu_has_feature(cpu_feature_hypervisor) ? "yes" : "no");
+#endif
     if (should_print_fail_info()) {
         logging_printf(LOG_LEVEL_VERBOSE(1), "%s_fail_percent = %.1f\n", test->id,
-                       100. * (num_cpus() - pc) / num_cpus());
+                       100. * (num_devices() - pc) / num_devices());
         logging_printf(LOG_LEVEL_VERBOSE(1), "%s_random_generator_state = %s\n", test->id,
                        random_format_seed().c_str());
+#ifdef SANDSTONE_DEVICE_CPU
         logging_printf(LOG_LEVEL_VERBOSE(1), "%s_fail_mask = %s\n", test->id,
-                       Topology::topology().build_falure_mask(test).c_str());
+                       CpuTopology::topology().build_falure_mask(test).c_str()); // TODO I wouod want a fail mask for GPU as well
+#endif
         if (std::string time = format_duration(earliest_fail); time.size())
             logging_printf(LOG_LEVEL_VERBOSE(1), "%s_earliest_fail_time = %s\n", test->id, time.c_str());
     }
@@ -1806,7 +1814,6 @@ void KeyValuePairLogger::print_thread_header(int fd, int cpu, const char *prefix
         return;
     }
 
-    struct cpu_info *info = cpu_info + cpu;
     PerThreadData::Test *thr = sApp->test_thread_data(cpu);
     if (std::string time = format_duration(thr->fail_time); time.size()) {
         dprintf(fd, "%s_thread_%d_fail_time = %s\n", prefix, cpu, time.c_str());
@@ -1816,6 +1823,8 @@ void KeyValuePairLogger::print_thread_header(int fd, int cpu, const char *prefix
         dprintf(fd, "%s_thread_%d_loop_count = %" PRIu64 "\n", prefix, cpu,
                 thr->inner_loop_count);
     }
+#ifdef SANDSTONE_DEVICE_CPU
+    struct cpu_info *info = cpu_info + cpu;
     dprintf(fd, "%s_messages_thread_%d_cpu = %d\n", prefix, cpu, info->cpu_number);
     dprintf(fd, "%s_messages_thread_%d_family_model_stepping = %02x-%02x-%02x\n", prefix, cpu,
             info->family, info->model, info->stepping);
@@ -1828,6 +1837,7 @@ void KeyValuePairLogger::print_thread_header(int fd, int cpu, const char *prefix
             prefix, cpu);
     if (info->ppin)
         dprintf(fd, " 0x%" PRIx64, info->ppin);
+#endif
     dprintf(fd, "\n%s_messages_thread_%d = \\\n", prefix, cpu);
 }
 
@@ -1962,12 +1972,14 @@ std::string TapFormatLogger::fail_info_details()
 
     std::string seed = random_format_seed();
     std::string time = format_duration(earliest_fail, FormatDurationOptions::WithoutUnit);
-    std::string fail_mask = Topology::topology().build_falure_mask(test);
+#ifdef SANDSTONE_DEVICE_CPU
+    std::string fail_mask = CpuTopology::topology().build_falure_mask(test); // TODO fail mask for gpu!
 
     result.reserve(strlen("  fail: { cpu-mask: '', time-to-fail: , seed: '' }\n") +
                    seed.size() + time.size() + fail_mask.size());
     result += "  fail: { cpu-mask: ";
     add_value(fail_mask, '\'');
+#endif
     result += ", time-to-fail: ";
     add_value(time, '\0');
     result += ", seed: ";
@@ -2044,7 +2056,11 @@ void TapFormatLogger::maybe_print_yaml_marker(int fd)
     writeln(fd, yamlseparator,
             "\n  info: {version: ", program_version,
             ", timestamp: ", iso8601_time_now(Iso8601Format::WithoutMs),
+#ifdef SANDSTONE_DEVICE_CPU
             cpu_has_feature(cpu_feature_hypervisor) ? ", virtualized: true" : nothing,
+#else
+            nothing,
+#endif
             "}");
     if (std::string fail_info = fail_info_details(); !fail_info.empty())
         IGNORE_RETVAL(write(fd, fail_info.c_str(), fail_info.size()));
@@ -2062,6 +2078,7 @@ void TapFormatLogger::print_thread_header(int fd, int cpu, int verbosity)
         return;
     }
 
+#ifdef SANDSTONE_DEVICE_CPU
     struct cpu_info *info = cpu_info + cpu;
     std::string line = stdprintf("  Thread %d on CPU %d (pkg %d, core %d, thr %d", cpu,
             info->cpu_number, info->package_id, info->core_id, info->thread_id);
@@ -2078,6 +2095,7 @@ void TapFormatLogger::print_thread_header(int fd, int cpu, int verbosity)
         line += ", PPIN N/A):";
 
     writeln(fd, line);
+#endif
 
     if (verbosity > 1) {
         PerThreadData::Test *thr = sApp->test_thread_data(cpu);
@@ -2131,8 +2149,9 @@ void YamlLogger::maybe_print_messages_header(int fd)
 
 std::string YamlLogger::thread_id_header(int cpu, int verbosity)
 {
-    struct cpu_info *info = cpu_info + cpu;
     std::string line;
+#ifdef SANDSTONE_DEVICE_CPU
+    struct cpu_info *info = cpu_info + cpu;
 #ifdef _WIN32
     line = stdprintf("{ logical-group: %2u, logical: %2u, ",
                      // see win32/cpu_affinity.cpp
@@ -2157,6 +2176,7 @@ std::string YamlLogger::thread_id_header(int cpu, int verbosity)
         add_value_or_null("\"%016" PRIx64 "\"", info->ppin);    // string to prevent loss of precision
     }
     line += " }";
+#endif
     return line;
 }
 
@@ -2463,7 +2483,7 @@ void YamlLogger::print()
         freqs += data->effective_freq_mhz;
     });
 
-    const double freq_avg = freqs / num_cpus();
+    const double freq_avg = freqs / num_devices();
     if (std::isfinite(freq_avg) && freq_avg != 0.0)
         logging_printf(LOG_LEVEL_VERBOSE(1), "  avg-freq-mhz: %.1f\n", freq_avg);
 
@@ -2524,33 +2544,35 @@ void YamlLogger::print_header(std::string_view cmdline, Duration test_duration, 
                    format_duration(test_duration, FormatDurationOptions::WithoutUnit).c_str(),
                    format_duration(test_timeout, FormatDurationOptions::WithoutUnit).c_str());
 
-    // print the CPU information
+#ifdef SANDSTONE_DEVICE_CPU
+    // print the CPU information // TODO gpu information!
     logging_printf(LOG_LEVEL_VERBOSE(1), "cpu-info:\n");
-    for (int i = 0; i < num_cpus(); ++i) {
+    for (int i = 0; i < num_devices(); ++i) {
         logging_printf(LOG_LEVEL_VERBOSE(1), "- %s   # %d\n",
                        thread_id_header(i, LOG_LEVEL_VERBOSE(2)).c_str(), i);
     }
 
-    auto make_plan_string = [](const std::vector<CpuRange> &plan) {
+    auto make_plan_string = [](const std::vector<DeviceRange> &plan) {
         std::string result;
-        for (CpuRange r : plan) {
+        for (DeviceRange r : plan) {
             if (result.size())
                 result += ", ";
             result += "{ starting_cpu: ";
-            result += std::to_string(r.starting_cpu);
+            result += std::to_string(r.starting_device);
             result += ", count: ";
-            result += std::to_string(r.cpu_count);
+            result += std::to_string(r.device_count);
             result += " }";
         }
         return result;
     };
-    const std::vector<CpuRange> &fullsocket = sApp->slice_plans.plans[SandstoneApplication::SlicePlans::IsolateSockets];
-    const std::vector<CpuRange> &heuristic = sApp->slice_plans.plans[SandstoneApplication::SlicePlans::Heuristic];
+    const std::vector<DeviceRange> &fullsocket = sApp->slice_plans.plans[SandstoneApplication::SlicePlans::IsolateSockets];
+    const std::vector<DeviceRange> &heuristic = sApp->slice_plans.plans[SandstoneApplication::SlicePlans::Heuristic];
     logging_printf(LOG_LEVEL_VERBOSE(1), "test-plans:\n");
     logging_printf(LOG_LEVEL_VERBOSE(1), "  fullsocket: [ %s ]\n",
                    make_plan_string(fullsocket).c_str());
     logging_printf(LOG_LEVEL_VERBOSE(1), "  heuristic: [ %s ]\n",
                    make_plan_string(heuristic).c_str());
+#endif
 
     print_tests_header(AtStart);
 }

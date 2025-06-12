@@ -2,12 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 framework_files += files(
-    'child_debug.cpp',
-    'resource.cpp',
-    'signals.cpp',
-    'splitlock_detect.c',
-    'stacksize.cpp',
-    'tmpfile.c',
+    'effective_cpu_freq.hpp',
 )
 
 # same check as linux/meson.build

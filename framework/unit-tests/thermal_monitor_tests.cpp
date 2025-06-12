@@ -5,7 +5,7 @@
 
 #include "gtest/gtest.h"
 #include <algorithm>
-#include "sysdeps/linux/thermal_monitor.hpp"
+#include "devicedeps/cpu/linux/thermal_monitor.hpp"
 
 namespace LinuxTesting {
     class LinuxThermalFixture : public ::testing::Test {
@@ -110,7 +110,7 @@ namespace LinuxTesting {
 // We will populate this when we implement it
 namespace WindowsBuild {
 
-#include "sysdeps/windows/thermal_monitor.hpp"
+#include "devicedeps/cpu/windows/thermal_monitor.hpp"
 
     class WindowsThermalFixture : public ::testing::Test {
     };

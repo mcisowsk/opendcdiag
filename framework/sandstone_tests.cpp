@@ -43,7 +43,9 @@ void SandstoneTestSet::load_all_tests()
     }
 
     /* add "special" mce_check as well */
-    all_tests.push_back(&mce_test);
+#ifdef SANDSTONE_DEVICE_CPU
+    all_tests.push_back(&mce_test); // TODO mce_test
+#endif
 }
 
 /* Looks up a name or a pattern among all "known" tests. Returns all the

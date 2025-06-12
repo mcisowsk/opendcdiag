@@ -7,9 +7,9 @@
 #include "sandstone_utils.h"
 #include "sandstone.h"
 
-#ifdef __x86_64__
+#if defined __x86_64__ && SANDSTONE_DEVICE_CPU
 #include "amx_common.h"
-#include "cpu_features.h"
+#include "devicedeps/cpu/cpu_features.h" // TODO unconditionally?
 #include "fp_vectors/Floats.h"
 
 #include <algorithm>
@@ -565,4 +565,7 @@ char *dump_xsave(const void *xsave_area, size_t xsave_size, int xsave_dump_mask)
     return nullptr;
 }
 
+#else
+void dump_gprs(std::string &f, SandstoneMachineContext mc) {}
+void dump_xsave(std::string &f, const void *xsave_area, size_t xsave_size, int xsave_dump_mask) {}
 #endif // x86-64

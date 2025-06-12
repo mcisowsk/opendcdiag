@@ -92,7 +92,7 @@ struct RandomEngineWrapper
     EngineType engine_type;
 
     RandomEngineWrapper(EngineType type)
-        : per_thread(num_cpus() + 1), engine_type(type)
+        : per_thread(num_devices() + 1), engine_type(type)
     {}
 
     virtual ~RandomEngineWrapper();
@@ -117,7 +117,7 @@ void RandomEngineDeleter::operator()(RandomEngineWrapper *ptr) const
 namespace {
 static thread_rng *rng_for_thread(int thread_num)
 {
-    assert(thread_num < num_cpus());
+    assert(thread_num < num_devices());
     assert(thread_num >= -1);
 
     auto &rngs = sApp->random_engine->per_thread;
@@ -293,7 +293,7 @@ int EngineWrapper<std::minstd_rand>::generateInt(thread_rng *generator)
 
 template struct EngineWrapper<std::minstd_rand>;
 
-#ifdef RANDOM_HAS_AES
+#if defined RANDOM_HAS_AES && defined SANDSTONE_DEVICE_CPU
 // -- AES engine (generates numbers by running AES over a state) --
 static bool haveAes()
 {
@@ -439,7 +439,7 @@ void random_init_global(const char *seed_from_user)
             sApp->random_engine.reset(new EngineWrapper<constant_value_engine>(engine_type));
             return;
         case AESSequence:
-#ifdef RANDOM_HAS_AES
+#if defined RANDOM_HAS_AES && defined SANDSTONE_DEVICE_CPU
             sApp->random_engine.reset(new EngineWrapper<aes_engine>(engine_type));
             return;
 #else
@@ -452,7 +452,7 @@ void random_init_global(const char *seed_from_user)
         }
         __builtin_unreachable();
     };
-    assert(num_cpus() > 0);
+    assert(num_devices() > 0);
     assert(thread_num == -1);
 
     // treat the argument as if it were a file, see if it works
@@ -540,6 +540,7 @@ void random_advance_seed()
     rand();
 }
 
+#ifdef SANDSTONE_DEVICE_CPU
 void random_init_thread(int thread_num)
 {
     // Create a pattern based exclusively on the topology that we'll use
@@ -569,6 +570,7 @@ void random_init_thread(int thread_num)
     // nothing should be modifying the global engine now
     sApp->random_engine->seedThread(rng_for_thread(thread_num), mixin);
 }
+#endif
 
 template <typename FP> static inline FP random_template(FP scale)
 {

@@ -57,6 +57,8 @@ __attribute__((weak)) extern const struct test_group __start_test_group;
 __attribute__((weak)) extern const struct test_group __stop_test_group;
 
 inline std::span<struct test> regular_tests = { &__start_tests, &__stop_tests };
+// TODO add at least one gpu test then it will link
+// inline std::span<struct test> regular_tests = {};
 #ifdef NO_SELF_TESTS
 constexpr const std::span<struct test> selftests = {};
 #else
@@ -84,7 +86,11 @@ public:
         if (cfg.randomize) {
             /* Do not shuffle mce_check if present. */
             auto end = test_set.end();
-            auto last = end[-1].test == &mce_test ? end - 1 : end;
+#ifdef SANDSTONE_DEVICE_CPU
+            auto last = end[-1].test == &mce_test ? end - 1 : end; // TODO mce_test
+#else
+            auto last = end;
+#endif
             std::shuffle(test_set.begin(), last, SandstoneURBG());
         }
         return test_set.begin();

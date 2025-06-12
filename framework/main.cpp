@@ -20,7 +20,7 @@
 #endif
 
 #include "sandstone.h"
-#include "cpuid_internal.h"
+#include "devicedeps/cpu/cpuid_internal.h"
 
 // from sandstone.cpp
 extern const uint64_t minimum_cpu_features;

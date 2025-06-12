@@ -293,159 +293,6 @@ void warn_deprecated_opt(const char *opt)
     fprintf(stderr, "%s: option '%s' is ignored and will be removed in a future version.\n",
             program_invocation_name, opt);
 }
-
-class BarrierDeviceSchedule : public DeviceSchedule
-{
-public:
-    void reschedule_to_next_device() override
-    {
-        auto on_completion = [&]() noexcept {
-            std::unique_lock lock(groups_mutex);
-            int g_idx = thread_num / members_per_group;
-            GroupInfo &group = groups[g_idx];
-
-            // Rotate cpus vector so reschedule group members to a different cpu
-            std::rotate(group.next_cpu.begin(), group.next_cpu.begin() + 1, group.next_cpu.end());
-            lock.unlock();
-
-            // Reschedule group members
-            for (int i=0; i<group.tid.size(); i++) {
-                pin_to_next_cpu(cpu_info[group.next_cpu[i]].cpu_number, group.tid[i]);
-            }
-        };
-
-        std::unique_lock lock(groups_mutex);
-        // Initialize groups on first run
-        if (groups.empty()) {
-            int full_groups = num_cpus() / members_per_group;
-            int partial_group_members = num_cpus() % members_per_group;
-
-            groups.reserve(full_groups + (partial_group_members > 0));
-            for (int i=0; i<full_groups; i++) {
-                groups.emplace_back(members_per_group, on_completion);
-            }
-            if (partial_group_members > 0) {
-                groups.emplace_back(partial_group_members, on_completion);
-            }
-        }
-
-        // Fill thread info if not done already
-        int g_idx = thread_num / members_per_group;
-        GroupInfo &group = groups[g_idx];
-        int thread_info_idx = thread_num % members_per_group;
-        if (group.tid[thread_info_idx] == 0) {
-            group.tid[thread_info_idx] = sApp->test_thread_data(thread_num)->tid.load();
-            group.next_cpu[thread_info_idx] = thread_num;
-        }
-
-        lock.unlock();
-
-        // Wait on proper barrier
-        group.barrier->arrive_and_wait();
-        return;
-    }
-
-    void finish_reschedule() override
-    {
-        // Don't clean up when test does not support rescheduling
-        if (groups.size() == 0) return;
-
-        // When thread finishes, unsubscribe it from barrier
-        // this avoid partners deadlocks
-        int g_idx = thread_num / members_per_group;
-        GroupInfo &group = groups[g_idx];
-
-        // Remove thread info from groups
-        std::unique_lock lock(groups_mutex);
-        int thread_info_idx = thread_num % members_per_group;
-        group.tid.erase(group.tid.begin() + thread_info_idx);
-
-        // Remove CPU information only if the thread failed, as it likely indicates a problematic device;
-        // otherwise, keep it for execution.
-        if(sApp->test_thread_data(thread_num)->has_failed())
-            group.next_cpu.erase(group.next_cpu.begin() + thread_info_idx);
-        lock.unlock();
-
-        group.barrier->arrive_and_drop();
-    }
-
-private:
-    struct GroupInfo {
-        std::barrier<std::function<void()>> *barrier;
-        std::vector<pid_t> tid;     // Keep track of all members tid
-        std::vector<int> next_cpu;  // Keep track of cpus on the group
-
-        GroupInfo(int members_per_group, std::function<void()> on_completion)
-        {
-            barrier = new std::barrier<std::function<void()>>(members_per_group, std::move(on_completion));
-            tid.resize(members_per_group);
-            next_cpu.resize(members_per_group);
-        }
-
-        ~GroupInfo()
-        {
-            delete barrier;
-        }
-    };
-
-    const int members_per_group = 2; // TODO: Make it configurable
-    std::vector<GroupInfo> groups;
-    std::mutex groups_mutex;
-};
-
-class QueueDeviceSchedule : public DeviceSchedule
-{
-public:
-    void reschedule_to_next_device() override
-    {
-        // Select a cpu from the queue
-        std::lock_guard lock(q_mutex);
-        if (q_idx == 0)
-            shuffle_queue();
-
-        int next_idx = queue[q_idx];
-        if (++q_idx == queue.size())
-            q_idx = 0;
-
-        pin_to_next_cpu(cpu_info[next_idx].cpu_number);
-        return;
-    }
-
-    void finish_reschedule() override {}
-
-private:
-    int q_idx = 0;
-    std::vector<int> queue;
-    std::mutex q_mutex;
-
-    void shuffle_queue()
-    {
-        // Must be called with mutex locked
-        if (queue.size() == 0) {
-            // First use: populate queue with the indexes available
-            for (int i=0; i<num_cpus(); i++)
-                queue.push_back(i);
-        }
-
-        std::default_random_engine rng(random32());
-        std::shuffle(queue.begin(), queue.end(), rng);
-    }
-};
-
-class RandomDeviceSchedule : public DeviceSchedule
-{
-public:
-    void reschedule_to_next_device() override
-    {
-        // Select a random cpu index among the ones available
-        int next_idx = unsigned(random()) % num_cpus();
-        pin_to_next_cpu(cpu_info[next_idx].cpu_number);
-
-        return;
-    }
-
-    void finish_reschedule() override {}
-};
 } /* anonymous namespace */
 
 int parse_cmdline(int argc, char** argv, SandstoneApplication* app, ParsedCmdLineOpts& opts) {
@@ -749,6 +596,7 @@ int parse_cmdline(int argc, char** argv, SandstoneApplication* app, ParsedCmdLin
                         .range_mode = OutOfRangeMode::Saturate
                 }();
                 break;
+#ifdef SANDSTONE_DEVICE_CPU
             case reschedule_option:
                 if (app->thread_count < 2) {
                     fprintf(stderr, "%s: --reschedule is only useful with at least 2 threads\n", argv[0]);
@@ -768,6 +616,7 @@ int parse_cmdline(int argc, char** argv, SandstoneApplication* app, ParsedCmdLin
                     return EX_USAGE;
                 }
                 break;
+#endif
             case strict_runtime_option:
                 app->shmem->use_strict_runtime = true;
                 break;
@@ -864,6 +713,7 @@ int parse_cmdline(int argc, char** argv, SandstoneApplication* app, ParsedCmdLin
                     app->shmem->max_messages_per_thread = INT_MAX;
                 break;
 
+#ifdef SANDSTONE_DEVICE_CPU
             case vary_frequency:
                 if (!FrequencyManager::FrequencyManagerWorks) {
                     fprintf(stderr, "%s: --vary-frequency works only on Linux\n", program_invocation_name);
@@ -879,6 +729,7 @@ int parse_cmdline(int argc, char** argv, SandstoneApplication* app, ParsedCmdLin
                 }
                 app->vary_uncore_frequency_mode = true;
                 break;
+#endif
 
             case version_option:
                 opts.action = Action::version;

@@ -14,7 +14,7 @@
 #include <stdlib.h>
 #include <sysexits.h>
 #include <unistd.h>
-#include "cpu_features.h"
+#include "cpu_features.h" // TODO devicedeps/cpu path needed? It's in the same dir as this file
 #include "sandstone_p.h"
 
 #ifdef __x86_64__

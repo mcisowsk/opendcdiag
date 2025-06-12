@@ -186,11 +186,12 @@ static int selftest_logs_getcpu_run(struct test *test, int cpu)
     return EXIT_SUCCESS;
 }
 
+#ifdef SANDSTONE_DEVICE_CPU
 static int selftest_logs_reschedule_init(struct test *test)
 {
     // In order to always get the same result and avoid race conditions,
     // we use semaphores to synchronize the access to reschedule()
-    int sem_size = num_cpus() - 1;
+    int sem_size = num_devices() - 1;
     sem_t *reschedule_sem = (sem_t *) calloc(sem_size, sizeof(sem_t));
     for (int i = 0; i < sem_size; i++) {
         sem_init(&reschedule_sem[i], 0, 0);
@@ -215,7 +216,7 @@ static int selftest_logs_reschedule_run(struct test *test, int cpu)
 
     // When we finish, instruct next thread it can proceed
     // unless we are the last one
-    if (cpu < num_cpus()-1)
+    if (cpu < num_devices()-1)
         sem_post(&semaphores[cpu]);
 
     cpu_number = get_cpu();
@@ -227,12 +228,14 @@ static int selftest_logs_reschedule_run(struct test *test, int cpu)
 static int selftest_logs_reschedule_cleanup(struct test *test)
 {
     sem_t *reschedule_sem = (sem_t *) test->data;
-    for (int i = 0; i < num_cpus() - 1; i++) {
+    for (int i = 0; i < num_devices() - 1; i++) {
         sem_destroy(&reschedule_sem[i]);
     }
     free (reschedule_sem);
     return EXIT_SUCCESS;
 }
+#endif
+
 static int selftest_logs_random_init(struct test *test)
 {
     // print 4 ints
@@ -261,7 +264,9 @@ static int selftest_cxxthrowcatch_run(struct test *test, int cpu)
 
 static int selftest_skip_init(struct test *test)
 {
+#ifdef SANDSTONE_DEVICES_CPU
     log_info("{\"packages\": %d, \"cpus\": %d}", num_packages(), num_cpus());
+#endif
     log_info("Requesting skip (this message should be visible)");
     return EXIT_SKIP;
 }
@@ -322,6 +327,7 @@ static int selftest_fail_cleanup(struct test *test)
     return EXIT_FAILURE;
 }
 
+#ifdef SANDSTONE_DEVICE_CPU
 template <int PackageId> static int selftest_log_skip_socket_init(struct test *test)
 {
     if (num_packages() == 1 && cpu_info[0].package_id == PackageId)
@@ -335,6 +341,7 @@ template <int PackageId> static int selftest_log_skip_socket_run(struct test *te
         return selftest_skip_run(test, cpu);
     return EXIT_SUCCESS;
 }
+#endif
 
 static int selftest_log_skip_run_all_threads(struct test *test, int cpu)
 {
@@ -404,6 +411,7 @@ static int selftest_noreturn_run(struct test *test, int cpu)
     return EXIT_FAILURE;
 }
 
+#ifdef SANDSTONE_DEVICE_CPU
 static int adjust_cpu_for_isolate_socket(int cpu)
 {
     // pretend we're running in test_schedule_isolate_socket
@@ -429,6 +437,7 @@ template <auto F> static int selftest_if_socket1_run(struct test *test, int cpu)
         return F(test, adjust_cpu_for_isolate_socket(cpu));
     return EXIT_SUCCESS;
 }
+#endif
 
 static int selftest_50pct_freeze_fail_run(struct test *test, int cpu)
 {
@@ -580,6 +589,7 @@ static int selftest_crash_run(struct test *test, int cpu)
     return EXIT_SUCCESS;
 }
 
+#ifdef SANDSTONE_DEVICE_CPU
 static void cause_sigill()
 {
     // some values for us to see in the register dump
@@ -654,6 +664,7 @@ static void cause_sigill()
     __builtin_trap();
 #endif
 }
+#endif
 
 static void cause_sigfpe()
 {
@@ -1108,6 +1119,7 @@ static struct test selftests_array[] = {
     .desired_duration = -1,
     .quality_level = TEST_QUALITY_PROD,
 },
+#ifdef SANDSTONE_DEVICE_CPU
 {
     .id = "selftest_logs_reschedule",
     .description = "Logs the getcpu() result before and after rescheduling",
@@ -1118,6 +1130,7 @@ static struct test selftests_array[] = {
     .desired_duration = -1,
     .quality_level = TEST_QUALITY_PROD,
 },
+#endif
 {
     .id = "selftest_logs_random_init",
     .description = "Logs some random numbers in the init function",
@@ -1171,6 +1184,7 @@ static struct test selftests_array[] = {
     .desired_duration = -1,
     .quality_level = TEST_QUALITY_PROD,
 },
+#ifdef SANDSTONE_DEVICE_CPU
 {
     .id = "selftest_log_skip_init_socket0",
     .description = "Skips using log_skip() in the init function only in socket 0",
@@ -1189,6 +1203,7 @@ static struct test selftests_array[] = {
     .desired_duration = -1,
     .quality_level = TEST_QUALITY_PROD,
 },
+#endif
 {
     .id = "selftest_log_skip_run_all_threads",
     .description = "Skips using log_skip() in the run function where all threads skip",
@@ -1393,7 +1408,7 @@ static struct test selftests_array[] = {
     .fracture_loop_count = 4,
     .quality_level = TEST_QUALITY_PROD,
 },
-
+#ifdef SANDSTONE_DEVICE_CPU
     /* Multi-socket tests */
 {
     .id = "selftest_failinit_socket1",
@@ -1437,6 +1452,7 @@ static struct test selftests_array[] = {
     .desired_duration = -1,
     .quality_level = TEST_QUALITY_PROD,
 },
+#endif
 
     /* Negative tests */
 
@@ -1569,6 +1585,7 @@ FOREACH_DATATYPE(DATACOMPARE_TEST)
     .desired_duration = -1,
     .quality_level = TEST_QUALITY_PROD,
 },
+#ifdef SANDSTONE_DEVICE_CPU
 {
     .id = "selftest_sigill",
     .description = "Crashes with SIGILL",
@@ -1577,6 +1594,7 @@ FOREACH_DATATYPE(DATACOMPARE_TEST)
     .desired_duration = -1,
     .quality_level = TEST_QUALITY_PROD,
 },
+#endif
 {
     .id = "selftest_sigfpe",
     .description = "Crashes with SIGFPE",

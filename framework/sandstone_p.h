@@ -40,12 +40,20 @@
 #include <sandstone_iovec.h>
 #include <sandstone_utils.h>
 
+#ifdef SANDSTONE_DEVICE_CPU
+#include "devicedeps/cpu/cpu_device.h"
+#include "devicedeps/cpu/topology.h"
 #include "effective_cpu_freq.hpp"
-#include "gettid.h"
-#include "topology.h"
-#include "interrupt_monitor.hpp"
 #include "thermal_monitor.hpp"
 #include "frequency_manager.hpp"
+#else
+#include "devicedeps/gpu/gpu_device.h"
+#include "devicedeps/gpu/topology.h"
+#endif
+
+#include "devicedeps/devices.h"
+#include "gettid.h"
+#include "interrupt_monitor.hpp"
 
 #ifdef _WIN32
 struct rusage
@@ -210,7 +218,7 @@ struct Common
 
 struct alignas(64) Main : Common
 {
-    CpuRange cpu_range;
+    DeviceRange cpu_range;
 };
 
 struct alignas(64) Test : Common
@@ -289,20 +297,6 @@ struct SandstoneBackgroundScan
 #endif
 };
 
-class DeviceSchedule {
-public:
-    virtual void reschedule_to_next_device() = 0;
-    virtual void finish_reschedule() = 0;
-    virtual ~DeviceSchedule() = default;
-protected:
-    void pin_to_next_cpu(int next_cpu, tid_t thread_id=0)
-    {
-        if (!pin_thread_to_logical_processor(LogicalProcessor(next_cpu), thread_id)) {
-            log_warning("Failed to reschedule %d (%tu) to CPU %d", thread_id, (uintptr_t)pthread_self(), next_cpu);
-        }
-    }
-};
-
 struct SandstoneApplication : public InterruptMonitor, public test_the_test_data<SandstoneConfig::Debug>
 {
     enum class OutputFormat : int8_t {
@@ -329,11 +323,11 @@ struct SandstoneApplication : public InterruptMonitor, public test_the_test_data
             IsolateSockets,
             Heuristic,
         };
-        using Slices = std::vector<CpuRange>;
+        using Slices = std::vector<DeviceRange>;
         std::array<Slices, 2> plans;
     };
 
-    using PerCpuFailures = std::vector<__uint128_t>;
+    using PerDeviceFailures = std::vector<__uint128_t>;
     struct SharedMemory;
 
     SlicePlans slice_plans;
@@ -363,7 +357,7 @@ struct SandstoneApplication : public InterruptMonitor, public test_the_test_data
     bool vary_frequency_mode = false;
     bool vary_uncore_frequency_mode = false;
     int inject_idle = 0;
-    static constexpr int MaxRetestCount = sizeof(PerCpuFailures::value_type) * 8;
+    static constexpr int MaxRetestCount = sizeof(PerDeviceFailures::value_type) * 8;
     int retest_count = 10;
     int total_retest_count = -2;
     int max_test_count = INT_MAX;
@@ -380,7 +374,9 @@ struct SandstoneApplication : public InterruptMonitor, public test_the_test_data
     ShortDuration delay_between_tests = std::chrono::milliseconds(5);
 
     std::unique_ptr<RandomEngineWrapper, RandomEngineDeleter> random_engine;
+#ifdef SANDSTONE_DEVICE_CPU
     std::unique_ptr<FrequencyManager> frequency_manager;
+#endif
 
 #ifndef __linux__
     std::string path_to_self;
@@ -424,7 +420,9 @@ struct SandstoneApplication : public InterruptMonitor, public test_the_test_data
 
     SandstoneBackgroundScan background_scan;
 
+#ifdef SANDSTONE_DEVICE_CPU
     std::unique_ptr<DeviceSchedule> device_schedule = nullptr;
+#endif
 
 private:
     SandstoneApplication() = default;
@@ -520,7 +518,7 @@ inline void SandstoneApplication::select_main_thread(int slice)
 {
     assert(current_fork_mode() != no_fork || slice == 0);
     main_thread_data_ptr += slice;
-    test_thread_data_ptr += main_thread_data_ptr->cpu_range.starting_cpu;
+    test_thread_data_ptr += main_thread_data_ptr->cpu_range.starting_device;
 }
 
 template <typename Lambda> static void for_each_main_thread(Lambda &&l, int max_slices = INT_MAX)
@@ -532,7 +530,7 @@ template <typename Lambda> static void for_each_main_thread(Lambda &&l, int max_
 
 template <typename Lambda> static void for_each_test_thread(Lambda &&l)
 {
-    for (int i = 0; i < num_cpus(); i++)
+    for (int i = 0; i < num_devices(); i++)
         l(sApp->test_thread_data(i), i);
 }
 
@@ -660,7 +658,7 @@ std::string random_format_seed();
 void random_init_thread(int thread_num);
 
 /* sandstone.cpp */
-TestResult run_one_test(int *tc, const struct test *test, SandstoneApplication::PerCpuFailures &per_cpu_fails);
+TestResult run_one_test(int *tc, const struct test *test, SandstoneApplication::PerDeviceFailures &per_dev_fails);
 
 /*
  * Called from sandstone_main() before logging_global_init() and before
@@ -668,7 +666,7 @@ TestResult run_one_test(int *tc, const struct test *test, SandstoneApplication::
  * careful about corrupting the log output.
  */
 void print_application_banner();
-int print_application_footer(int exit_code, SandstoneApplication::PerCpuFailures per_cpu_failures);
+int print_application_footer(int exit_code, SandstoneApplication::PerDeviceFailures per_dev_failures);
 
 #endif
 

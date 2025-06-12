@@ -28,7 +28,7 @@
 #endif
 
 static void update_topology(std::span<const struct cpu_info> new_cpu_info,
-                            std::span<const Topology::Package> sockets = {});
+                            std::span<const CpuTopology::Package> sockets = {});
 
 namespace {
 struct auto_fd
@@ -84,10 +84,23 @@ struct linux_cpu_info
 
 struct cpu_info *cpu_info = nullptr;
 
-static Topology &cached_topology()
+static CpuTopology &cached_topology()
 {
-    static Topology cached_topology = Topology({});
+    static CpuTopology cached_topology = CpuTopology({});
     return cached_topology;
+}
+
+int num_cpus()
+{
+    return sApp->thread_count;
+}
+
+int num_devices() {
+    return num_cpus();
+}
+
+int num_packages() {
+    return CpuTopology::topology().packages.size();
 }
 
 #ifdef __linux__
@@ -1042,7 +1055,7 @@ static const fill_ucode_func ucode_impls[] = { fill_ucode_sysfs, fill_ucode_msr 
 /* prefer CPUID, fallback to sysfs. */
 static const fill_topo_func topo_impls[] = { fill_topo_cpuid, fill_topo_sysfs };
 
-void apply_cpuset_param(char *param)
+void apply_deviceset_param(char *param)
 {
     struct MatchCpuInfoByCpuNumber {
         int cpu_number;
@@ -1259,13 +1272,13 @@ static void init_topology_internal(const LogicalProcessorSet &enabled_cpus)
     fill_numa();
 }
 
-static void populate_core_group(Topology::CoreGrouping *group, const Topology::Thread *begin,
-                                const Topology::Thread *end)
+static void populate_core_group(CpuTopology::CoreGrouping *group, const CpuTopology::Thread *begin,
+                                const CpuTopology::Thread *end)
 {
     // fill in the threads
     auto fill_in_threads = [&](auto &where, auto what) {
-        const Topology::Thread *first = begin;
-        const Topology::Thread *last = first;
+        const CpuTopology::Thread *first = begin;
+        const CpuTopology::Thread *last = first;
         for ( ; last != end; ++last) {
             if (last->*what == first->*what)
                 continue;
@@ -1276,34 +1289,34 @@ static void populate_core_group(Topology::CoreGrouping *group, const Topology::T
         where.push_back({ { first, end } });
     };
 
-    fill_in_threads(group->cores, &Topology::Thread::core_id);
-    // fill_in_threads(group->modules, &Topology::Thread::module_id);
+    fill_in_threads(group->cores, &CpuTopology::Thread::core_id);
+    // fill_in_threads(group->modules, &CpuTopology::Thread::module_id);
 }
 
-static Topology build_topology()
+static CpuTopology build_topology()
 {
     struct cpu_info *info = cpu_info;
     const struct cpu_info *const end = cpu_info + num_cpus();
 
-    std::vector<Topology::Package> packages;
+    std::vector<CpuTopology::Package> packages;
     if (int max_package_id = end[-1].package_id; max_package_id >= 0)
         packages.reserve(max_package_id + 1);
     else
-        return Topology({});
+        return CpuTopology({});
 
     while (info != end) {
         if (info->package_id < 0 || info->core_id < 0 || info->thread_id < 0)
-            return Topology({});
+            return CpuTopology({});
 
-        Topology::Package *pkg = &packages.emplace_back();
+        CpuTopology::Package *pkg = &packages.emplace_back();
 
         // scan forward to the end of this package
-        Topology::Thread *first = info;
-        Topology::Thread *numafirst = info;
+        CpuTopology::Thread *first = info;
+        CpuTopology::Thread *numafirst = info;
         int core_count = 0;
         for (int last_core_id = -1; info != end; ++info) {
             if (info->core_id < 0 || info->thread_id < 0)
-                return Topology({});
+                return CpuTopology({});
             if (info->package_id != first->package_id)
                 break;
             if (info->core_id != last_core_id) {
@@ -1322,22 +1335,22 @@ static Topology build_topology()
         populate_core_group(pkg, first, info);
 
         // populate the last NUMA node, which may be the only one too
-        Topology::NumaNode *numa = &pkg->numa_domains.emplace_back();
+        CpuTopology::NumaNode *numa = &pkg->numa_domains.emplace_back();
         if (pkg->numa_domains.size() == 1)
             numa->CoreGrouping::operator=(*pkg);    // just copy the Package
         else
             populate_core_group(numa, numafirst, info);
     }
 
-    return Topology(std::move(packages));
+    return CpuTopology(std::move(packages));
 }
 
-const Topology &Topology::topology()
+const CpuTopology &CpuTopology::topology()
 {
     return cached_topology();
 }
 
-Topology::Data Topology::clone() const
+CpuTopology::Data CpuTopology::clone() const
 {
     Data result;
     result.all_threads.assign(cpu_info, cpu_info + num_cpus());
@@ -1356,7 +1369,7 @@ Topology::Data Topology::clone() const
 }
 
 void update_topology(std::span<const struct cpu_info> new_cpu_info,
-                     std::span<const Topology::Package> packages)
+                     std::span<const CpuTopology::Package> packages)
 {
     struct cpu_info *end;
     if (packages.empty()) {
@@ -1365,7 +1378,7 @@ void update_topology(std::span<const struct cpu_info> new_cpu_info,
     } else {
         // copy only if matching the socket ID
         auto matching = [=](const struct cpu_info &ci) {
-            for (const Topology::Package &p : packages) {
+            for (const CpuTopology::Package &p : packages) {
                 if (p.id() == ci.package_id)
                     return true;
             }
@@ -1382,20 +1395,31 @@ void update_topology(std::span<const struct cpu_info> new_cpu_info,
     cached_topology() = build_topology();
 }
 
-void init_topology(const LogicalProcessorSet &enabled_cpus)
+void init_num_devices()
 {
+    LogicalProcessorSet result = ambient_logical_processor_set();
+    sApp->thread_count = result.count();
+    sApp->user_thread_data.resize(sApp->thread_count);
+#ifdef M_ARENA_MAX
+    mallopt(M_ARENA_MAX, sApp->thread_count * 2);
+#endif
+}
+
+void init_topology()
+{
+    auto enabled_cpus = ambient_logical_processor_set(); // TODO duplicate call to ambient_logical_processor_set
     init_topology_internal(enabled_cpus);
     reorder_cpus();
     cached_topology() = build_topology();
 }
 
-void restrict_topology(CpuRange range)
+void restrict_topology(DeviceRange range)
 {
-    assert(range.starting_cpu + range.cpu_count <= sApp->thread_count);
-    auto old_cpu_info = std::exchange(cpu_info, sApp->shmem->cpu_info + range.starting_cpu);
-    int old_thread_count = std::exchange(sApp->thread_count, range.cpu_count);
+    assert(range.starting_device + range.device_count <= sApp->thread_count);
+    auto old_cpu_info = std::exchange(cpu_info, sApp->shmem->cpu_info + range.starting_device);
+    int old_thread_count = std::exchange(sApp->thread_count, range.device_count);
 
-    Topology &topo = cached_topology();
+    CpuTopology &topo = cached_topology();
     if (old_cpu_info != cpu_info || old_thread_count != sApp->thread_count ||
             topo.packages.size() == 0)
         topo = build_topology();
@@ -1407,7 +1431,7 @@ static char character_for_mask(uint32_t mask)
     return mask < 0xa ? '0' + mask : 'a' + mask - 0xa;
 }
 
-std::string Topology::build_falure_mask(const struct test *test) const
+std::string CpuTopology::build_falure_mask(const struct test *test) const
 {
     std::string result;
     if (!isValid())
@@ -1476,4 +1500,294 @@ std::string Topology::build_falure_mask(const struct test *test) const
     // remove last ':'
     result.resize(result.size() - 1);
     return result;
+}
+
+void slice_plan_init(int max_cores_per_slice)
+{
+    auto set_to_full_system = []() {
+        // only one plan and that's the full system
+        std::vector plan = { DeviceRange{ 0, num_cpus() } };
+        sApp->slice_plans.plans.fill(plan);
+        return;
+    };
+    for (std::vector<DeviceRange> &plan : sApp->slice_plans.plans)
+        plan.clear();
+
+    if (sApp->current_fork_mode() == SandstoneApplication::no_fork || max_cores_per_slice < 0)
+        return set_to_full_system();
+
+    // The heuristic is enabled by max_cores_per_slice == 0 and a valid
+    // topology:
+    // - if the CPU Set has less than or equal to MinimumCpusPerSocket (8)
+    //   logical processors per socket (on average), we ignore the topology and
+    //   will instead run in slices of up to DefaultMaxCoresPerSlice (32)
+    //   logical processors.
+    // - otherwise, we'll have at least one slice per socket
+    //   * if the socket has more than 32 cores, we'll attempt to slice it
+    //     at NUMA node boundaries
+    //   * if a NUMA node has more than 32 cores, we'll attempt to split it
+    //     evenly so each slice has 32 cores (64 threads on a system with 2
+    //     threads per core)
+    // - we always keep the cores of a given module and threads of a core
+    //   in the same slice
+    //   * this means on some situations the slices may have more than 32 cores
+    //     (i.e. the 32nd and 33rd core were part of the same module)
+    //
+    // If the user specifies a --max-cores-per-slice option in the
+    // command-line, it will bypass the heuristic but keep the slice balancing
+    // as described above. Be aware bypasses the minimum average processor per
+    // socket check.
+
+    int max_cpu = num_cpus();
+    const CpuTopology &topology = CpuTopology::topology();
+    while (topology.isValid()) {     // not a loop, just so we can use break
+        using SlicePlans = SandstoneApplication::SlicePlans;
+        static constexpr int MinimumCpusPerSocket = SlicePlans::MinimumCpusPerSocket;
+        static constexpr int DefaultMaxCoresPerSlice = SlicePlans::DefaultMaxCoresPerSlice;
+
+        if (max_cores_per_slice == 0) {
+            // apply defaults
+            int average_cpus_per_socket = max_cpu / topology.packages.size();
+            max_cores_per_slice = DefaultMaxCoresPerSlice;
+            if (average_cpus_per_socket <= MinimumCpusPerSocket)
+                break;
+        }
+
+        // set up proper plans
+        std::vector<DeviceRange> &isolate_socket = sApp->slice_plans.plans[SlicePlans::IsolateSockets];
+        std::vector<DeviceRange> &split = sApp->slice_plans.plans[SlicePlans::Heuristic];
+        auto push_to = [](std::vector<DeviceRange> &to, auto start, auto end) {
+            int start_cpu = start[0].threads.front().cpu();
+            int end_cpu = end[-1].threads.back().cpu();
+            assert(end_cpu >= start_cpu);
+            to.push_back(DeviceRange{ start_cpu, end_cpu + 1 - start_cpu });
+        };
+
+        for (const CpuTopology::Package &p : topology.packages) {
+            if (p.cores.size() == 0)
+                continue;       // untested socket
+
+            push_to(isolate_socket, p.cores.begin(), p.cores.end());
+            if (p.cores.size() <= max_cores_per_slice) {
+                // easy case: package has fewer than max_cores_per_slice
+                split = isolate_socket;
+                continue;
+            }
+
+            // if we have to split, we'll try to split along NUMA node lines
+            for (const CpuTopology::NumaNode &n : p.numa_domains) {
+                if (n.cores.size() == 0)
+                    continue;   // untested node (shouldn't happen!)
+
+                auto begin = n.cores.begin();
+                const auto end = n.cores.end();
+                ptrdiff_t slice_count = n.cores.size() / max_cores_per_slice;
+                if (n.cores.size() % max_cores_per_slice)
+                    ++slice_count;  // round up (also makes at least 1)
+                ptrdiff_t slice_size = n.cores.size() / slice_count;
+
+                // populate slices of roughly slice_size cores, but keep
+                // modules within the same slice
+                while (end - begin > slice_size) {
+                    auto e = begin + slice_size;
+                    while (e != end && e[-1].threads[0].module_id == e[0].threads[0].module_id)
+                        ++e;
+                    push_to(split, begin, e);
+                    begin = e;
+                }
+                if (begin != end)
+                    push_to(split, begin, end);
+            }
+        }
+        return;
+    }
+
+    if (max_cores_per_slice == 0) {
+        set_to_full_system();
+    } else {
+        // dumb plan, not *cores*
+        int slice_count = (max_cpu - 1) / max_cores_per_slice + 1;
+        std::vector<DeviceRange> plan;
+        plan.reserve(slice_count);
+
+        int slice_size = max_cpu / slice_count;
+        int cpu = 0;
+        for ( ; cpu < max_cpu - slice_size; cpu += slice_size)
+            plan.push_back(DeviceRange{ cpu, slice_size });
+        plan.push_back(DeviceRange{ cpu, max_cpu - cpu });
+        sApp->slice_plans.plans.fill(plan);
+    }
+}
+
+namespace {
+// Creates a string containing all socket temperatures like: "P0:30oC P2:45oC"
+std::string format_socket_temperature_string(const std::vector<int> & temps)
+{
+    std::string temp_string;
+    for(int i=0; i<temps.size(); ++i){
+        if (temps[i] != INVALID_TEMPERATURE){
+            char buffer[64];
+            sprintf(buffer, "P%d:%.1foC", i, temps[i]/1000.0);
+            temp_string += std::string(buffer) + " ";
+        }
+    }
+    return temp_string;
+}
+}
+
+void print_temperature_and_throttle()
+{
+    if (sApp->thermal_throttle_temp < 0)
+        return;     // throttle disabled
+
+    std::vector<int> temperatures = ThermalMonitor::get_all_socket_temperatures();
+
+    if (temperatures.empty()) return; // Cant find temperature files at all (probably on windows)
+
+    int highest_temp = *max_element(temperatures.begin(), temperatures.end());
+
+    while ((highest_temp > sApp->thermal_throttle_temp) && sApp->threshold_time_remaining > 0) {
+
+        if ((sApp->threshold_time_remaining % 1000) == 0) {
+            logging_printf(LOG_LEVEL_VERBOSE(1),
+                           "# CPU temperature (%.1foC) above threshold (%.1foC), throttling (%.1f s remaining)\n",
+                           highest_temp / 1000.0, sApp->thermal_throttle_temp / 1000.0,
+                           sApp->threshold_time_remaining / 1000.0);
+            logging_printf(LOG_LEVEL_VERBOSE(1),
+                    "# All CPU temperatures: %s\n", format_socket_temperature_string(temperatures).c_str());
+        }
+
+        const int throttle_ms = 100;
+        usleep(throttle_ms * 1000);
+        sApp->threshold_time_remaining -= throttle_ms;
+
+        temperatures = ThermalMonitor::get_all_socket_temperatures();
+        highest_temp = *max_element(temperatures.begin(), temperatures.end());
+    }
+
+    logging_printf(LOG_LEVEL_VERBOSE(1),
+                   "# CPU temperatures: %s\n", format_socket_temperature_string(temperatures).c_str());
+}
+
+void reschedule()
+{
+    if (sApp->device_schedule == nullptr) return;
+    sApp->device_schedule->reschedule_to_next_device();
+    return;
+}
+
+void DeviceSchedule::pin_to_next_cpu(int next_cpu, tid_t thread_id)
+{
+    if (!pin_thread_to_logical_processor(LogicalProcessor(next_cpu), thread_id)) {
+        log_warning("Failed to reschedule %d (%tu) to CPU %d", thread_id, (uintptr_t)pthread_self(), next_cpu);
+    }
+}
+
+void BarrierDeviceSchedule::reschedule_to_next_device()
+{
+    auto on_completion = [&]() noexcept {
+        std::unique_lock lock(groups_mutex);
+        int g_idx = thread_num / members_per_group;
+        GroupInfo &group = groups[g_idx];
+
+        // Rotate cpus vector so reschedule group members to a different cpu
+        std::rotate(group.next_cpu.begin(), group.next_cpu.begin() + 1, group.next_cpu.end());
+        lock.unlock();
+
+        // Reschedule group members
+        for (int i=0; i<group.tid.size(); i++) {
+            pin_to_next_cpu(cpu_info[group.next_cpu[i]].cpu_number, group.tid[i]);
+        }
+    };
+
+    std::unique_lock lock(groups_mutex);
+    // Initialize groups on first run
+    if (groups.empty()) {
+        int full_groups = num_cpus() / members_per_group;
+        int partial_group_members = num_cpus() % members_per_group;
+
+        groups.reserve(full_groups + (partial_group_members > 0));
+        for (int i=0; i<full_groups; i++) {
+            groups.emplace_back(members_per_group, on_completion);
+        }
+        if (partial_group_members > 0) {
+            groups.emplace_back(partial_group_members, on_completion);
+        }
+    }
+
+    // Fill thread info if not done already
+    int g_idx = thread_num / members_per_group;
+    GroupInfo &group = groups[g_idx];
+    int thread_info_idx = thread_num % members_per_group;
+    if (group.tid[thread_info_idx] == 0) {
+        group.tid[thread_info_idx] = sApp->test_thread_data(thread_num)->tid.load();
+        group.next_cpu[thread_info_idx] = thread_num;
+    }
+
+    lock.unlock();
+
+    // Wait on proper barrier
+    group.barrier->arrive_and_wait();
+    return;
+}
+
+void BarrierDeviceSchedule::finish_reschedule()
+{
+    // Don't clean up when test does not support rescheduling
+    if (groups.size() == 0) return;
+
+    // When thread finishes, unsubscribe it from barrier
+    // this avoid partners deadlocks
+    int g_idx = thread_num / members_per_group;
+    GroupInfo &group = groups[g_idx];
+
+    // Remove thread info from groups
+    std::unique_lock lock(groups_mutex);
+    int thread_info_idx = thread_num % members_per_group;
+    group.tid.erase(group.tid.begin() + thread_info_idx);
+
+    // Remove CPU information only if the thread failed, as it likely indicates a problematic device;
+    // otherwise, keep it for execution.
+    if(sApp->test_thread_data(thread_num)->has_failed())
+        group.next_cpu.erase(group.next_cpu.begin() + thread_info_idx);
+    lock.unlock();
+
+    group.barrier->arrive_and_drop();
+}
+
+void QueueDeviceSchedule::reschedule_to_next_device()
+{
+    // Select a cpu from the queue
+    std::lock_guard lock(q_mutex);
+    if (q_idx == 0)
+        shuffle_queue();
+
+    int next_idx = queue[q_idx];
+    if (++q_idx == queue.size())
+        q_idx = 0;
+
+    pin_to_next_cpu(cpu_info[next_idx].cpu_number);
+    return;
+}
+
+void QueueDeviceSchedule::shuffle_queue()
+{
+    // Must be called with mutex locked
+    if (queue.size() == 0) {
+        // First use: populate queue with the indexes available
+        for (int i=0; i< num_cpus(); i++)
+            queue.push_back(i);
+    }
+
+    std::default_random_engine rng(random32());
+    std::shuffle(queue.begin(), queue.end(), rng);
+}
+
+void RandomDeviceSchedule::reschedule_to_next_device()
+{
+    // Select a random cpu index among the ones available
+    int next_idx = unsigned(random()) % num_cpus();
+    pin_to_next_cpu(cpu_info[next_idx].cpu_number);
+
+    return;
 }

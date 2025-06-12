@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <topology.h>
+#include <devicedeps/cpu/topology.h>
 
 #include <sched.h>
 #include <stdio.h>
@@ -66,13 +66,13 @@ bool pin_thread_to_logical_processor(LogicalProcessor n, tid_t thread_id, const 
     return true;
 }
 
-bool pin_to_logical_processors(CpuRange range, const char *thread_name)
+bool pin_to_logical_processors(DeviceRange range, const char *thread_name)
 {
     set_thread_name(thread_name);
 
     // find the maximum CPU number
     int n = 0;
-    for (int cpu = range.starting_cpu; cpu < range.starting_cpu + range.cpu_count; ++cpu)
+    for (int cpu = range.starting_device; cpu < range.starting_device + range.device_count; ++cpu)
         n = std::max(n, cpu_info[cpu].cpu_number);
 
     using Word = LogicalProcessorSetOps::Word;
@@ -82,7 +82,7 @@ bool pin_to_logical_processors(CpuRange range, const char *thread_name)
     Word cpu_set[size];         // -Wvla
     memset(cpu_set, 0, sizeof(cpu_set));
 
-    for (int cpu = range.starting_cpu; cpu < range.starting_cpu + range.cpu_count; ++cpu) {
+    for (int cpu = range.starting_device; cpu < range.starting_device + range.device_count; ++cpu) {
         auto lp = LogicalProcessor(cpu_info[cpu].cpu_number);
         LogicalProcessorSetOps::setInArray({ cpu_set, size }, lp);
     }
