@@ -100,6 +100,9 @@ enum {
     weighted_testrun_option,
     alpha_option,
     beta_option,
+#if SANDSTONE_DEVICE_IDXD
+    idxd_user_config_option,
+#endif
 
     // syntethic values to track which of conflicting opts is currently active
     _duration_option,
@@ -110,7 +113,7 @@ enum {
     _format_option,
 };
 
-static struct option long_options[]  = {
+static struct option long_options[] = {
     { "1sec", no_argument, nullptr, one_sec_option },
     { "30sec", no_argument, nullptr, thirty_sec_option },
     { "2min", no_argument, nullptr, two_min_option },
@@ -191,6 +194,10 @@ static struct option long_options[]  = {
     { "version", no_argument, nullptr, version_option },
     { "weighted-testrun-type", required_argument, nullptr, weighted_testrun_option },
     { "yaml", optional_argument, nullptr, 'Y' },
+#if SANDSTONE_DEVICE_IDXD
+    // it won't be parsed here, but we need it defined for parser to recognize it
+    { "idxd-config", required_argument, nullptr, idxd_user_config_option },
+#endif
 
 #if defined(__SANITIZE_ADDRESS__)
     { "is-asan-build", no_argument, nullptr, is_asan_option },
@@ -204,7 +211,8 @@ static struct option long_options[]  = {
     { nullptr, 0, nullptr, 0 }
 };
 
-void suggest_help(char **argv) {
+void suggest_help(char **argv)
+{
     fprintf(OUT_STREAM, "Try '%s --help' for more information.\n", argv[0]);
 }
 
@@ -424,11 +432,32 @@ inline int simple_getopt(int argc, char **argv, struct option *options, int *cop
     return getopt_long(argc, argv, cached_short_opts.c_str(), options, coptind);
 }
 
-struct ProgramOptionsParser {
-
+struct ProgramOptionsParser
+{
     std::map<int, std::variant<bool, int, const char*, std::vector<const char*>, ShortDuration>> opts_map;
 
-    void add_to_map_as_vec(int opt, const char *arg) {
+    static int verify_args(int argc, char** argv)
+    {
+        int opt;
+        int coptind = -1;
+        optind = 1;
+        opterr = 1; // make sure we print the unrecognized option message
+
+        while ((opt = simple_getopt(argc, argv, long_options, &coptind)) != -1) {
+            switch (opt) {
+            case '?':
+                suggest_help(argv);
+                return EX_USAGE;
+            }
+        }
+
+        opterr = 0; // further calls do not need to print the message
+
+        return EXIT_SUCCESS;
+    }
+
+    void add_to_map_as_vec(int opt, const char *arg)
+    {
         auto map = opts_map.find(opt);
         if (map == opts_map.end()) {
             opts_map.emplace(opt, std::vector<const char*>{arg});
@@ -639,6 +668,9 @@ struct ProgramOptionsParser {
                 warn_deprecated_opt(long_options[coptind].name);
                 break;
 
+#if SANDSTONE_DEVICE_IDXD
+            case idxd_user_config_option:
+#endif
             case 0:
                 /* long option setting a value */
                 continue;
@@ -664,7 +696,8 @@ struct ProgramOptionsParser {
     }
 
     template <typename StringType = const char*>
-    StringType string_opt_for(int opt) {
+    StringType string_opt_for(int opt)
+    {
         auto it = opts_map.find(opt);
         if (it != opts_map.end())
             return std::get<const char*>(it->second);
@@ -1121,7 +1154,8 @@ struct ProgramOptionsParser {
     }
 
     // here we play it simple
-    int parse_restricted_command_line(int argc, char** argv, SandstoneApplicationConfig* app_cfg, ProgramOptions& opts) {
+    int parse_restricted_command_line(int argc, char** argv, SandstoneApplicationConfig* app_cfg, ProgramOptions& opts)
+    {
         // Default options for the simplified OpenDCDiag cmdline
         static struct option restricted_long_options[] = {
             { "help", no_argument, nullptr, 'h' },
@@ -1174,7 +1208,13 @@ struct ProgramOptionsParser {
 };
 } /* anonymous namespace */
 
-int ProgramOptions::parse(int argc, char** argv, SandstoneApplicationConfig* app_cfg) {
+int ProgramOptions::verify(int argc, char** argv)
+{
+    return ProgramOptionsParser::verify_args(argc, argv);
+}
+
+int ProgramOptions::parse(int argc, char** argv, SandstoneApplicationConfig* app_cfg)
+{
     ProgramOptionsParser parser;
     if constexpr (SandstoneConfig::RestrictedCommandLine) {
         return parser.parse_restricted_command_line(argc, argv, app_cfg, *this);

@@ -8,7 +8,8 @@
 
 #include "sandstone_tests.h"
 
-enum class Action {
+enum class Action
+{
     list_tests,
     list_group,
     dump_cpu_info,
@@ -17,7 +18,8 @@ enum class Action {
     run,
 };
 
-struct ProgramOptions {
+struct ProgramOptions
+{
     Action action = Action::run; // action to be taken after cmdline parsing is done, default: run tests
 
     const char* seed = nullptr;
@@ -47,6 +49,7 @@ struct ProgramOptions {
 
     bool test_tests = false;
 
+    static int verify(int argc, char** argv);
     int parse(int argc, char** argv, SandstoneApplicationConfig* app_cfg);
 
     // for RestrictedCommandLine put it here to enable code elimination
@@ -63,7 +66,8 @@ struct ProgramOptions {
     TestConfig shmem_cfg;
 };
 
-inline int parse_cmdline(int argc, char** argv, SandstoneApplicationConfig* app_cfg, ProgramOptions& opts) {
+inline int parse_cmdline(int argc, char** argv, SandstoneApplicationConfig* app_cfg, ProgramOptions& opts)
+{
     auto ret = opts.parse(argc, argv, app_cfg);
     if constexpr (SandstoneConfig::RestrictedCommandLine) {
         opts.apply_restrictions(); // enable code elimination

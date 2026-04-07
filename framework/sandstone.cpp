@@ -921,11 +921,18 @@ int main(int argc, char **argv)
         return exec_mode_run(argc - 2, argv + 2);
     }
 
+    if (int ret = ProgramOptions::verify(argc, argv)) {
+        return ret;
+    }
+
     bool any_device = false;
     {
         auto enabled_devices = detect_devices<EnabledDevices>();
         if (!enabled_devices.empty()) {
             any_device = true;
+            if (int ret = apply_user_device_config(argc, argv)) {
+                return ret;
+            }
             init_shmem();
             setup_devices(std::move(enabled_devices));
         }

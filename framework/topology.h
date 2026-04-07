@@ -194,6 +194,7 @@ bool pin_to_logical_processor(LogicalProcessor, const char *thread_name = nullpt
 bool pin_thread_to_logical_processor(LogicalProcessor n, tid_t thread_id, const char *thread_name = nullptr);
 bool pin_to_logical_processors(DeviceRange, const char *thread_name);
 
+int apply_user_device_config(/* ??? */int argc, char **argv);
 void apply_deviceset_param(const char *param);
 void slice_plan_init(int max_cores_per_slice);
 

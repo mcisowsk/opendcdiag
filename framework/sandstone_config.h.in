@@ -36,6 +36,7 @@
 
 #mesondefine SANDSTONE_DEVICE_CPU
 #mesondefine SANDSTONE_DEVICE_GPU
+#mesondefine SANDSTONE_DEVICE_IDXD
 
 #mesondefine SANDSTONE_FREQUENCY_MANAGER
 
